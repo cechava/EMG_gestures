@@ -728,7 +728,7 @@ def log_reg_on_labeled_data(X, Y, times, series, nsplits, unmarked = 0,penalty =
     times_abs = np.empty((0,))
     max_time = 0
     for s in np.unique(series):
-        series_idxs = np.where(series==0)[0]
+        series_idxs = np.where(series==s)[0]
         times_abs = np.hstack((times_abs,times[series_idxs]+max_time))
         max_time = np.max(times_abs)
 
@@ -778,13 +778,13 @@ def log_reg_on_labeled_data(X, Y, times, series, nsplits, unmarked = 0,penalty =
 
         #predict labels on train set
         ypred = model.predict(trainX)
-        #get F1 score
-        train_f1_scores[split_count] = f1_score(trainY,ypred,average = 'macro')
+        #get F1 score (weighted to account for slight class imbalance)
+        train_f1_scores[split_count] = f1_score(trainY,ypred,average = 'weighted')
 
         #predict labels on test set
         ypred = model.predict(testX)
-        #get F1 score
-        test_f1_scores[split_count] = f1_score(testY,ypred,average = 'macro')
+        #get F1 score (weighted to account for slight class imbalance)
+        test_f1_scores[split_count] = f1_score(testY,ypred,average = 'weighted')
 
 
         #get prediction probabiliity on test set samples
@@ -883,6 +883,32 @@ def many_to_many_model(input_shape, n_outputs, mask_value = -100):
     model = Model(inputs = X_input, outputs = X)
     return model
 
+def get_RNN_f1(X, Y, model, average = 'weighted', mask_value = -100):
+    """
+    Get f1 score for an RNN model using masked timepoint data
+
+    Args:
+        X: 3D numpy array with shape [samples, timepoints, features]
+        Y: 3D numpy array with shape [samples, timepoints, classes]. one-hot coding of classes
+        model: RNN model object
+        average: string argument for f1_score function. Usually 'macro' or 'weighted'
+        mask_value: value indicating which timepoints to mask out
+
+    Returns:
+        f1: f1 score
+    """
+    # Mask out indices based on mask value
+    nonmasked_idxs = np.where(X[:,:,0].flatten()!=mask_value)[0]
+    # Get target labels for non-masked timepoints
+    y_true = np.argmax(Y,2).flatten()[nonmasked_idxs]
+    # Get model predictions for non-masked timepoints
+    preds = model.predict(X)
+    y_pred = np.argmax(preds,2).flatten()[nonmasked_idxs]
+    # Get F1 score
+    f1 = f1_score(y_true,y_pred,average = average)
+
+    return f1
+
 def RNN_on_labeled_data(feature_matrix, target_labels, window_tstamps, block_labels, n_splits = 4,\
                        verbose = 0, epochs = 40, batch_size = 2, permute = False):
     """
@@ -898,8 +924,7 @@ def RNN_on_labeled_data(feature_matrix, target_labels, window_tstamps, block_lab
     Returns:
         train_f1_scores: training scores for each split
         test_f1_scores: test scores for each split
-        train_loss: training loss metric for each split
-        test_loss_scores: test loss metric for each split
+
 
     """
     
@@ -909,8 +934,7 @@ def RNN_on_labeled_data(feature_matrix, target_labels, window_tstamps, block_lab
     #initialize empty array
     train_f1_scores = np.empty((n_splits,))
     test_f1_scores = np.empty((n_splits,))
-    train_loss = np.empty((n_splits,))
-    test_loss = np.empty((n_splits,))
+
 
     #get block_ids and corresponding classes in block. there are the units over which we will do train/test split
     blocks = np.array([k for k,g in groupby(block_labels) if k!=0])
@@ -918,6 +942,7 @@ def RNN_on_labeled_data(feature_matrix, target_labels, window_tstamps, block_lab
     
     #permute class labels, if indicated
     if permute:
+        #using indexing tricks to have this work out
         classes_perm = np.random.permutation(classes)
         target_labels_shuffled = np.empty((0,))
         for i,b in enumerate(blocks):
@@ -967,7 +992,7 @@ def RNN_on_labeled_data(feature_matrix, target_labels, window_tstamps, block_lab
 
         #setting timestep dimension to None 
         model = many_to_many_model((None,n_features),n_outputs,mask_value = -100)
-        model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy',Precision(), Recall()])
+        model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
         #model.summary
 
         print('Training Model')
@@ -975,18 +1000,8 @@ def RNN_on_labeled_data(feature_matrix, target_labels, window_tstamps, block_lab
         model.fit(X_train_cube, Y_train_cube, epochs=epochs, batch_size=batch_size, verbose=verbose)
 
         print('Evaluating Model')
+        #evaluate model on train and test data
+        train_f1_scores[split_count] = get_RNN_f1(X_train_cube, Y_train_cube, model)
+        test_f1_scores[split_count] = get_RNN_f1(X_test_cube, Y_test_cube, model)
 
-        #evaluate on trained data
-        loss, accuracy, precision, recall = model.evaluate(X_train_cube, Y_train_cube, batch_size=batch_size, verbose=verbose)
-        #compute f1 score and store
-        f1_score = 2* ((precision * recall)/(precision + recall))
-        train_f1_scores[split_count] = f1_score
-        train_loss[split_count] = loss
-
-        #evaluate on trained data
-        loss, accuracy, precision, recall = model.evaluate(X_test_cube, Y_test_cube, batch_size=batch_size, verbose=verbose)
-        #compute f1 score and store
-        f1_score = 2* ((precision * recall)/(precision + recall))
-        test_f1_scores[split_count] = f1_score
-        test_loss[split_count] = loss
-    return train_f1_scores, test_f1_scores, train_loss, test_loss
+    return train_f1_scores, test_f1_scores
