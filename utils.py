@@ -807,6 +807,59 @@ def log_reg_on_labeled_data(X, Y, times, series, nsplits, unmarked = 0,penalty =
     
     return train_f1_scores, test_f1_scores, prob_class
 
+def log_reg_xsubject_labeled_data(X0, Y0, X1, Y1, exclude = [0,7], penalty = 'none', multiclass = 'multinomial',permute = False):
+    """
+    Train a logistic regression classifier on data from one subject; Test classifier on data from another subject
+    Train on data from one subject; test on data
+    
+    Args:
+        X0/1: 2D numpy array with shape [samples, features]
+        Y0/1: array with class label for each sample
+        exclude: labels to exclude (default: 0 = unmarked; 7 = open hand - not collected for all subjects)
+        permute: Boolean to shuffle class labels (useful to test performance under null hypothesis) 
+        -parameters for logistic regression
+        penalty: type of penalty for classifier
+        multiclass: approach for multiclass classification
+            
+    Returns:
+        train_f1: f1 score for data from same subject used to train model (obviously biased)
+        test_f1: f1 score for data from subject NOT used to train model
+
+    """
+
+    #select 
+    in_samples = np.where(np.isin(Y0,exclude, invert = True))[0]
+    X0_in = X0[in_samples,:]
+    Y0_in = Y0[in_samples]
+
+    in_samples = np.where(np.isin(Y1,exclude, invert = True))[0]
+    X1_in = X1[in_samples,:]
+    Y1_in = Y1[in_samples]
+
+    #permute class labels, if indicated
+    if permute:
+        Y0_in = np.random.permutation(Y0_in)
+        Y1_in = np.random.permutation(Y1_in)
+
+
+    #define model
+
+    model = make_pipeline(StandardScaler(),\
+                          LogisticRegression(penalty = penalty, multi_class = multiclass ,max_iter = 10000))
+    #fit model
+    model.fit(X0_in, Y0_in)
+
+    #predict labels on train set (same subject)
+    ypred = model.predict(X0_in)
+    #get F1 score (weighted to account for slight class imbalance)
+    train_f1 = f1_score(Y0_in,ypred,average = 'weighted')
+
+    #predict labels on test set (other subject)
+    ypred = model.predict(X1_in)
+    #get F1 score (weighted to account for slight class imbalance)
+    test_f1 = f1_score(Y1_in,ypred,average = 'weighted')
+    return train_f1, test_f1
+
 # ~~~~~~~~ RNN CLASSIFIER FUNCTIONS ~~~~~~~~
 def get_data_cube(X, Y, window_blocks, train = True, scaler = None, magic_value = -100):
     """
@@ -937,7 +990,7 @@ def RNN_on_labeled_data(feature_matrix, target_labels, window_tstamps, block_lab
 
 
     #get block_ids and corresponding classes in block. there are the units over which we will do train/test split
-    blocks = np.array([k for k,g in groupby(block_labels) if k!=0])
+    blocks = np.array([k for k,g in groupby(block_labels)])
     classes = np.array([k for k,g in groupby(target_labels) if k!=0])
     
     #permute class labels, if indicated
@@ -951,9 +1004,12 @@ def RNN_on_labeled_data(feature_matrix, target_labels, window_tstamps, block_lab
         target_labels = target_labels_shuffled
         classes = classes_perm
      
-
+    
     #stratify split to retain ratio of class labels
     skf = StratifiedKFold(n_splits=n_splits,shuffle = True)
+    print(block_labels.shape)
+    print(target_labels.shape)
+    print(blocks.shape,classes.shape)
 
     #systematically use one fold of the data as a held-out test set
     for split_count, (blocks_train_idxs, blocks_test_idxs) in enumerate(skf.split(blocks, classes)):
@@ -1005,3 +1061,214 @@ def RNN_on_labeled_data(feature_matrix, target_labels, window_tstamps, block_lab
         test_f1_scores[split_count] = get_RNN_f1(X_test_cube, Y_test_cube, model)
 
     return train_f1_scores, test_f1_scores
+
+def permute_class_blocks(block_labels,class_labels):
+    """
+    Permute class labels while retaining the same class label within each block
+
+    Args:
+      block_labels: 1D numpy array indicating block of provenance for each sample
+      class_labels: 1D numpy array indicating class label for each sample
+          
+    Returns:
+      class_labels_shuffled: permuted class labels for each sample
+      classes_perm: permuted class labels for each blocks
+    """
+
+    # #get block_ids and corresponding classes in block
+    blocks = np.array([k for k,g in groupby(block_labels)])
+    classes = np.array([k for k,g in groupby(class_labels) if k!=0])
+
+
+    #using indexing tricks to have this work out
+    classes_perm = np.random.permutation(classes)
+    class_labels_shuffled = np.empty((0,))
+    for i,b in enumerate(blocks):
+        idxs = np.where(block_labels==b)[0]
+        class_labels_shuffled = np.hstack((class_labels_shuffled,classes_perm[i]*np.ones((idxs.size,))))
+
+    return class_labels_shuffled, classes_perm
+
+def get_trained_RNN(X , Y, blocks, verbose = 0, epochs = 40, batch_size = 2, permute = False):
+    """
+    Train model
+
+    Args:
+      X: 2D numpy array with shape [features, samples]
+      Y: array with class label for each sample
+      blocks: 1D numpy array indicating block of provenance for input segment values
+      verbose: argument indicating verbosity for tensorflow traning and evaluating function
+      epochs: number of epochs to use for training
+      batch_size: number of samples to include in each batch
+      permute: Boolean to shuffle class labels (useful to test performance under null hypothesis) 
+          
+    Returns:
+      model: trained model
+      train_f1: train F1 score
+      scaler: StandardScaler object fit to training data
+    """
+
+    #permute class labels, if indicated
+    if permute:
+        Y, dummy = permute_class_blocks(blocks, Y)
+
+    # select training data and pad to get an array where each sample has same number of timesteps
+    #one-hot encoding of class labels
+    Y = to_categorical(Y-np.min(Y))
+
+    #get cube
+    X_train_cube, Y_train_cube, scaler = get_data_cube(X, Y, blocks, train = True, magic_value = -100)
+    print(X_train_cube.shape, Y_train_cube.shape)
+
+    n_timesteps, n_features, n_outputs = X_train_cube.shape[1], X_train_cube.shape[2], Y_train_cube.shape[2]
+    #setting timestep dimension to None 
+    model = many_to_many_model((None,n_features),n_outputs,mask_value = -100)
+    model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+    #model.summary
+
+    print('Training Model')
+    # fit network
+    model.fit(X_train_cube, Y_train_cube, epochs=epochs, batch_size=batch_size, verbose=verbose)
+
+    #evaluate on training data
+    train_f1 = get_RNN_f1(X_train_cube, Y_train_cube, model)
+
+    return model, train_f1, scaler
+
+def evaluate_trained_RNN(X, Y, blocks, model, scaler, permute = False):
+    """
+    Evaluate model
+
+    Args:
+      X: 2D numpy array with shape [features, samples]
+      Y: array with class label for each sample
+      blocks: 1D numpy array indicating block of provenance for input segment values
+      model: trained RNN model object
+      scaler: StandardScaler object fit to training data
+      permute: Boolean to shuffle class labels (useful to test performance under null hypothesis) 
+          
+    Returns:
+      test_f1: test F1 score
+    """
+    #permute class labels, if indicated
+    if permute:
+        Y, dummy = permute_class_blocks(blocks, Y)
+
+
+    #one-hot encoding of class labels
+    Y = to_categorical(Y-np.min(Y))
+
+    #get data cube
+    X_test_cube, Y_test_cube, scaler = get_data_cube(X, Y, blocks, train = False, scaler = scaler, magic_value = -100)
+    print(X_test_cube.shape, Y_test_cube.shape)
+    print('Evaluating Model')
+    test_f1 = get_RNN_f1(X_test_cube, Y_test_cube, model)
+
+    return test_f1
+
+def RNN_xsubject(data_folder, src_subject_id, nsubjects, nreps, lo_freq, hi_freq, win_size, step, exclude, \
+                 model_folder, verbose = 0, epochs = 40, batch_size = 2, permute = False):
+    """
+    Train RNN model on one subject's data and test on another subject's data
+
+    Args:
+        -General Info- 
+        data_folder: path to folder with all subjects' data
+        src_subject_id: ID for subject to use to train RNN model
+        nsubjects: number of subjects in data set
+        nreps: number of times to repeat training and evaluation of model
+        -Preprocesing Parameters-
+        lo_freq: lower bound of bandpass filter
+        hi_freq: higher bound of bandpass filter
+        win_size: length of segment over which to compute features
+        step: amount of overlap between neighboring segments
+        exclude: labels to exclude (default: 0 = unmarked; 7 = open hand - not collected for all subjects)
+        -RNN training Parameters-
+        verbose: argument indicating verbosity for tensorflow traning and evaluating function
+        epochs: number of epochs to use for training
+        batch_size: number of samples to include in each batch
+        permute: Boolean to shuffle class labels (useful to test performance under null hypothesis) 
+            
+    Returns:
+        results_df: pandas dataframe with training and testing F1 scores for all subjects and repetitions 
+    """
+
+    # Set seed for replicability
+    np.random.seed(1)
+
+    results_df = []
+
+    subject_folder = os.path.join(data_folder,'%02d'%(src_subject_id))
+    print('Source Subject :%s'%(subject_folder))
+
+    # Process data and get features 
+    #get features across segments and corresponding info
+    X0, Y0, window_tstamps0, \
+    blocks0, series_labels0 = get_subject_data_for_classification(subject_folder, lo_freq, hi_freq, \
+                                                                    win_size, step)
+
+    #exclude indicated timepoints
+    in_samples = np.where(np.isin(Y0,exclude, invert = True))[0]
+    X0_in = X0[in_samples,:].T
+    Y0_in = Y0[in_samples]
+    blocks0_in = blocks0[in_samples]
+
+    #initialize empty list
+    train_f1_scores = np.empty((nreps,))
+
+    for rep in range(nreps):
+        print('Repetition: %d'%(rep+1))
+
+        # Set seed for replicability
+        np.random.seed(rep)
+
+        model, train_f1, scaler = get_trained_RNN(X0_in, Y0_in, blocks0_in,\
+                                          verbose = verbose, epochs = epochs, batch_size = batch_size, permute = permute)
+
+        #save training score to list
+        train_f1_scores[rep] = train_f1
+
+        #save trained model
+        model_fn = os.path.join(model_folder, 'trained_model_subject_%02d_rep_%d.h5'%(src_subject_id,rep))
+        keras.models.save_model(model, model_fn, save_format= 'h5')
+
+        # test on all other subjects
+
+        # initialize empty lists
+        test_f1_scores = np.empty((0,))
+        src_subject_list = []
+        targ_subject_list = []
+        for targ_subject_id in range(1,nsubjects+1):
+            if targ_subject_id != src_subject_id:
+                subject_folder = os.path.join(data_folder,'%02d'%(targ_subject_id))
+                print('Target Subject :%s'%(subject_folder))
+
+                # Process data and get features 
+                #get features across segments and corresponding info
+                X1, Y1, window_tstamps1, \
+                blocks1, series_labels1 = get_subject_data_for_classification(subject_folder, lo_freq, hi_freq, \
+                                                                                win_size, step)
+                in_samples = np.where(np.isin(Y1,exclude, invert = True))[0]
+                X1_in = X1[in_samples,:].T
+                Y1_in = Y1[in_samples]
+                blocks1_in = blocks1[in_samples]
+
+                test_f1 = evaluate_trained_RNN(X1_in, Y1_in, blocks1_in, model, scaler, permute=permute)
+                #append to list
+                test_f1_scores = np.hstack((test_f1_scores, test_f1))
+                targ_subject_list.append(targ_subject_id)
+
+        #put test results in dataframe
+        results_df.append(pd.DataFrame({'F1_score':test_f1_scores,\
+                                                  'Type':['Test' for x in range(test_f1_scores.size)],\
+                                                  'Rep':[rep+1 for x in range(test_f1_scores.size)],\
+                                                'Test_Subject':targ_subject_list}))
+    #put training results in dataframe
+    results_df.append(pd.DataFrame({'F1_score':train_f1_scores,\
+                                  'Type':['Train' for x in range(train_f1_scores.size)],\
+                                  'Rep': np.arange(nreps)+1,\
+                                  'Test_Subject':[src_subject_id for x in range(train_f1_scores.size)]}))
+
+    results_df = pd.concat(results_df, axis = 0).reset_index(drop = True)
+
+    return results_df
