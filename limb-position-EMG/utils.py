@@ -32,6 +32,7 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import make_pipeline
 from sklearn.manifold import TSNE
+from sklearn.model_selection import KFold
 
 
 from tensorflow import keras
@@ -631,6 +632,290 @@ def dim_reduction_visualization(X, target_labels):
     
 
 # ~~~~~~~~ LOGISTIC REGRESSION FUNCTIONS ~~~~~~~~
+
+def get_log_reg_model(input_shape, n_outputs, n_dense_pre = 0, drop_prob = 0.5, activation = 'tanh'):
+    """
+    Create 
+    
+    Args:
+        input_shape
+        n_outputs: number of output classes
+        mask_value: value indicating which timepoints to mask out
+            
+    Returns:
+        model
+    """
+    
+    #define model architecture
+    X_input = Input(shape = input_shape)
+    X = X_input
+    for n in range(n_dense_pre):
+        X = Dense(input_shape[0],activation = activation)(X)
+        X = Dropout(drop_prob)(X)
+    X = Dense(n_outputs,activation = 'softmax')(X)
+    model = Model(inputs = X_input, outputs = X)
+    return model
+
+def get_log_reg_f1(X, Y, model, average = 'weighted', mask_value = -100):
+    """
+    Get f1 score for an RNN model using masked timepoint data
+
+    Args:
+        X: 3D numpy array with shape [samples, timepoints, features]
+        Y: 3D numpy array with shape [samples, timepoints, classes]. one-hot coding of classes
+        model: RNN model object
+        average: string argument for f1_score function. Usually 'macro' or 'weighted'
+        mask_value: value indicating which timepoints to mask out
+
+    Returns:
+        f1: f1 score
+    """
+    # Mask out indices based on mask value
+    nonmasked_idxs = np.where(Y[:,0].flatten()!=mask_value)[0]
+    # Get target labels for non-masked timepoints
+    y_true = np.argmax(Y,1).flatten()[nonmasked_idxs]
+    # Get model predictions for non-masked timepoints
+    preds = model.predict(X)
+    y_pred = np.argmax(preds,1).flatten()[nonmasked_idxs]
+    # Get F1 score
+    f1 = f1_score(y_true,y_pred,average = average)
+
+    return f1
+
+def prepare_data_for_log_reg(X,Y, select_idxs, exclude_labels, train = False,scaler = None):
+
+    X_cube =  X[select_idxs,:]
+    Y_cube = Y[select_idxs]
+
+    if train:
+        scaler = StandardScaler()
+        scaler = scaler.fit(X_cube)
+        X_cube = scaler.transform(X_cube)
+    else:
+        X_cube = scaler.transform(X_cube)
+
+    include_idxs = np.where(np.isin(Y_cube,exclude_labels, invert = True))[0]
+
+    X_cube = X_cube[include_idxs,:]
+    Y_cube = Y_cube[include_idxs]
+    Y_cube = to_categorical(Y_cube-np.min(Y_cube))
+
+    return X_cube, Y_cube, scaler
+def shift_array(arr, num, fill_value=np.nan):
+    result = np.empty_like(arr)
+    if num > 0:
+        result[:num] = fill_value
+        result[num:] = arr[:-num]
+    elif num < 0:
+        result[num:] = fill_value
+        result[:num] = arr[-num:]
+    else:
+        result[:] = arr
+    return result
+
+def get_mv_preds(X, model, n_votes):
+    #get predictions by majority voting scheme
+
+    y_prob = np.squeeze(model.predict(X))
+    y_pred = np.argmax(y_prob,1)
+
+    y_stack = y_pred.astype('float').copy()
+    y_last = y_pred.astype('float').copy()
+
+    for n in range(n_votes):
+        y_shifted = shift_array(y_last,1)
+        y_stack = np.vstack((y_stack,y_shifted))
+        y_last = y_shifted.copy()
+
+    y_pred_mv, vote_counts = scipy.stats.mode(y_stack,0,nan_policy='omit')
+    y_pred_mv = np.squeeze(y_pred_mv.data)
+
+    return y_pred_mv
+
+def within_subject_log_reg_performance(X, Y, series_labels, exclude,  verbose = 0, epochs = 40, batch_size = 2, mv = False, permute = False):
+    
+    #initialize object for k-fold cross-validation
+    n_splits = np.unique(series_labels).size
+    kf = KFold(n_splits=n_splits,shuffle = True)
+    #initialize empty arrays
+    train_f1_scores = np.empty((n_splits,))
+    test_f1_scores = np.empty((n_splits,))
+
+    for split_count, (series_train, series_test) in enumerate(kf.split(np.unique(series_labels))):
+        print('Split Count: %i'% (split_count+1))
+        #get train and test idxs
+        train_idxs = np.where(series_labels==series_train)[0]
+        test_idxs = np.where(series_labels==series_test)[0]
+        #get training data cubes
+        X_train_cube, Y_train_cube, scaler = prepare_data_for_log_reg(X,Y, train_idxs, exclude, train = True)
+        if permute:
+            perm_idxs = np.random.permutation(np.arange(Y_train_cube.shape[0]))
+            Y_train_cube = Y_train_cube[perm_idxs,:]
+
+        n_features, n_outputs = X_train_cube.shape[1], Y_train_cube.shape[1]
+
+        #setting timestep dimension to None 
+        model = get_log_reg_model((n_features,),n_outputs)
+        model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+        #model.summary
+
+        print('Training Model')
+        # fit network
+        history = model.fit(X_train_cube, Y_train_cube, epochs=epochs, batch_size=batch_size, verbose=verbose)
+
+        # # evaluate trained network
+        print('Evaluate Model')
+        
+
+        if mv:
+            # get testing data cubes
+            X_test_cube, Y_test_cube, scaler = prepare_data_for_log_reg(X,Y, train_idxs, [], train = False, scaler = scaler)
+            y_pred = get_mv_preds(X_test_cube, model, n_votes= 5)+1
+            y_true = np.squeeze(np.argmax(Y_test_cube,1))
+            include_idxs = np.where(np.isin(y_true,exclude, invert = True))[0]
+            y_true = y_true[include_idxs]
+            y_pred = y_pred[include_idxs]
+            train_f1 = f1_score(y_true,y_pred,average = 'weighted')
+
+            # get testing data cubes
+            X_test_cube, Y_test_cube, scaler = prepare_data_for_log_reg(X,Y, test_idxs, [], train = False, scaler = scaler)
+            y_pred = get_mv_preds(X_test_cube, model, n_votes= 5)+1
+            y_true = np.squeeze(np.argmax(Y_test_cube,1))
+            include_idxs = np.where(np.isin(y_true,exclude, invert = True))[0]
+            y_true = y_true[include_idxs]
+            y_pred = y_pred[include_idxs]
+            test_f1 = f1_score(y_true,y_pred,average = 'weighted')
+        else:
+            #get score for training data
+            train_f1 = get_log_reg_f1(X_train_cube, Y_train_cube, model)
+            # get testing data cubes
+            X_test_cube, Y_test_cube, scaler = prepare_data_for_log_reg(X,Y, test_idxs, exclude, train = False, scaler = scaler)
+            #get score for testing data
+            test_f1 = get_log_reg_f1(X_test_cube, Y_test_cube, model)
+        #put scores in array
+        train_f1_scores[split_count] = train_f1
+        test_f1_scores[split_count] = test_f1
+
+    return train_f1_scores, test_f1_scores
+
+
+def get_trained_model(X, Y, train_idxs, exclude, verbose = 0, epochs = 40, batch_size = 2, mv = False, permute = False):
+
+    #get training data cubes
+    X_train_cube, Y_train_cube, scaler = prepare_data_for_log_reg(X,Y, train_idxs, exclude, train = True)
+    if permute:
+        perm_idxs = np.random.permutation(np.arange(Y_train_cube.shape[0]))
+        Y_train_cube = Y_train_cube[perm_idxs,:]
+
+    n_features, n_outputs = X_train_cube.shape[1], Y_train_cube.shape[1]
+
+    #setting timestep dimension to None 
+    model = get_log_reg_model((n_features,),n_outputs)
+    model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+    #model.summary
+
+    print('Training Model')
+    # fit network
+    history = model.fit(X_train_cube, Y_train_cube, epochs=epochs, batch_size=batch_size, verbose=verbose)
+    # # evaluate trained network
+    print('Evaluate Model on Trained Data')
+
+    if mv:
+        # get testing data cubes
+        X_test_cube, Y_test_cube, scaler = prepare_data_for_log_reg(X,Y, train_idxs, [], train = False, scaler = scaler)
+        y_pred = get_mv_preds(X_test_cube, model, n_votes= 5)+1
+        y_true = np.squeeze(np.argmax(Y_test_cube,1))
+        include_idxs = np.where(np.isin(y_true,exclude, invert = True))[0]
+        y_true = y_true[include_idxs]
+        y_pred = y_pred[include_idxs]
+        train_f1 = f1_score(y_true,y_pred,average = 'weighted')
+
+    else:
+        #get score for training data
+        train_f1 = get_log_reg_f1(X_train_cube, Y_train_cube, model)
+    return train_f1, model, scaler, history
+
+def evaluate_trained_log_reg(X, Y, test_idxs, exclude, trained_model, scaler, mv):
+
+    print('Evaluate Model')
+    if mv:
+        # get testing data cubes
+        X_test_cube, Y_test_cube, scaler = prepare_data_for_log_reg(X,Y, test_idxs, [], train = False, scaler = scaler)
+        y_pred = get_mv_preds(X_test_cube, trained_model, n_votes= 5)+1
+        y_true = np.squeeze(np.argmax(Y_test_cube,1))
+        include_idxs = np.where(np.isin(y_true,exclude, invert = True))[0]
+        y_true = y_true[include_idxs]
+        y_pred = y_pred[include_idxs]
+        test_f1 = f1_score(y_true,y_pred,average = 'weighted')
+    else:
+
+        # get testing data cubes
+        X_test_cube, Y_test_cube, scaler = prepare_data_for_log_reg(X,Y, test_idxs, exclude, train = False, scaler = scaler)
+        #get score for testing data
+        test_f1 = get_log_reg_f1(X_test_cube, Y_test_cube, trained_model)
+    return test_f1
+
+def log_reg_xsubject_test(data_folder, src_subject_id, nsubjects, nreps, lo_freq, hi_freq, win_size, step, exclude, \
+                          verbose = 0, epochs = 40, batch_size = 2, mv = False, permute = False):
+    
+    
+    subject_folder = os.path.join(data_folder,'%02d'%(src_subject_id))
+    print('=======================')
+    print(subject_folder)
+
+    # Process data and get features 
+    #get features across segments and corresponding info
+    feature_matrix_src, target_labels_src, window_tstamps_src, \
+    block_labels_src, series_labels_src = get_subject_data_for_classification(subject_folder, lo_freq, hi_freq, \
+                                                                win_size, step)
+    train_idxs = np.arange(target_labels_src.size)
+    np.random.seed(1)#for reproducibility
+
+    results_df = []#initialize empty array for dataframes
+    train_f1_scores = np.empty((nreps,))
+    for rep in range(nreps):
+
+        print('Subject %d|Rep %d'%(src_subject_id, rep+1))
+        train_f1, trained_model, scaler, train_history = get_trained_model(feature_matrix_src, target_labels_src, train_idxs, exclude,\
+                                                                        verbose = verbose, epochs = epochs, batch_size = batch_size,\
+                                                                        mv = mv, permute = permute)
+        train_f1_scores[rep] = train_f1
+        # test on all other subjects
+        # initialize empty lists
+        test_f1_scores = np.empty((0,))
+        targ_subject_list = []
+        for targ_subject_id in range(1,nsubjects+1):
+            if targ_subject_id != src_subject_id:
+
+                subject_folder = os.path.join(data_folder,'%02d'%(targ_subject_id))
+                print('Target Subject :%s'%(subject_folder))
+
+                # Process data and get features 
+                #get features across segments and corresponding info
+                feature_matrix_targ, target_labels_targ, window_tstamps_targ, \
+                block_labels_targ, series_labels_targ = get_subject_data_for_classification(subject_folder, lo_freq, hi_freq, \
+                                                                        win_size, step)
+                test_idxs = np.arange(target_labels_targ.size)
+
+                test_f1 = evaluate_trained_log_reg(feature_matrix_targ, target_labels_targ, test_idxs, exclude, trained_model, scaler, mv = mv)
+                #append to list
+                test_f1_scores = np.hstack((test_f1_scores, test_f1))
+                targ_subject_list.append(targ_subject_id)
+
+        #put test results in dataframe
+        results_df.append(pd.DataFrame({'F1_score':test_f1_scores,\
+                                                    'Type':['Test' for x in range(test_f1_scores.size)],\
+                                                    'Rep':[rep+1 for x in range(test_f1_scores.size)],\
+                                                'Test_Subject':targ_subject_list}))
+    #put training results in dataframe
+    results_df.append(pd.DataFrame({'F1_score':train_f1_scores,\
+                                    'Type':['Train' for x in range(train_f1_scores.size)],\
+                                    'Rep': np.arange(nreps)+1,\
+                                    'Test_Subject':[src_subject_id for x in range(train_f1_scores.size)]}))
+    
+    results_df = pd.concat(results_df, axis = 0).reset_index(drop = True)
+
+    return results_df
 
 def log_reg_on_all_data(X, Y, nsplits, penalty = 'none', multiclass = 'multinomial',permute = False):
     """
