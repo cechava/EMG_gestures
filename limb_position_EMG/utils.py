@@ -47,7 +47,7 @@ __all__ = ['get_gesture_times','get_steady_samp_rate_data','butter_bandpass_filt
 'get_data_cube',\
 'plot_sensor_values','plot_signal_pspec','visualize_time_series_prob','dim_reduction_visualization',\
 'plot_train_loss',\
-'shift_array','get_mv_preds','apply_mv_and_get_f1_score'\
+'shift_array','get_mv_preds','apply_mv_and_get_f1_score',\
 'permute_class_blocks','permute_class_within_sub',\
 'get_log_reg_model','get_log_reg_f1','prepare_data_for_log_reg',\
 'get_transform_module','tm_template_weights_to_model','model_weights_to_tm_template']
