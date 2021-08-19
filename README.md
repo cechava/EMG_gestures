@@ -1,4 +1,4 @@
-# limb-position-EMG
+# limb_position_EMG
 
 Personal project exploring different types of classifiers for the task of classifying upper-limb gestures from EMG data collected with a MYO thalmic bracelet. This repository contains notebooks with different stages of development of a robust classification algorithm.
 
