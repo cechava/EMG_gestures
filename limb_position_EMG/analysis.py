@@ -42,6 +42,8 @@ from tensorflow. keras.layers import Dense, Activation, Dropout, Input,  TimeDis
 
 from tensorflow.keras.utils import to_categorical
 
+from limb_position_EMG.utils import *
+
 __all__ = ['within_subject_log_reg_performance','get_trained_model','evaluate_trained_log_reg','log_reg_xsubject_test',\
 'log_reg_xsubject_transform_module_train_frac_subjects','log_reg_xsubject_transform_module_train_all_subjects']
 
@@ -238,7 +240,7 @@ def log_reg_xsubject_test(data_folder, src_subject_id, nsubjects, nreps, lo_freq
 
 def log_reg_xsubject_transform_module_train_frac_subjects(feature_matrix, target_labels, sub_labels, block_labels, series_labels, exclude,\
                                                          model_dict,n_train_splits = 4, n_val_splits = 2,\
-                                                         verbose = 0, epochs = 40, batch_size = 2, permute = False):
+                                                         verbose = 0, epochs = 40, batch_size = 2, mv = None,permute = False):
     """
     train and validate a logistic regression model with a transform module for domain adaptation. 
     train and validate model performance by splitting subjects into a train and test set
