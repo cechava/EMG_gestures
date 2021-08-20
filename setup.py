@@ -10,7 +10,7 @@ INSTALL_REQ = [
 ''
 ]
 
-opts = dict(name = 'limb_position_EMG',
+opts = dict(name = 'EMG_gestures',
             maintainer='Cesar Echavarria',
             maintainer_email='cechavarria60@gmail.com',
             description='package with functions to analyze EMG data',

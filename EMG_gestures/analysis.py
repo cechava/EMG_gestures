@@ -42,7 +42,7 @@ from tensorflow. keras.layers import Dense, Activation, Dropout, Input,  TimeDis
 
 from tensorflow.keras.utils import to_categorical
 
-from limb_position_EMG.utils import *
+from EMG_gestures.utils import *
 
 __all__ = ['within_subject_log_reg_performance','get_trained_model','evaluate_trained_log_reg','log_reg_xsubject_test',\
 'log_reg_xsubject_transform_module_train_frac_subjects','log_reg_xsubject_transform_module_train_all_subjects']
