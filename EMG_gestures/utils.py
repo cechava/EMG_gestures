@@ -47,7 +47,8 @@ __all__ = ['get_gesture_times','get_steady_samp_rate_data','butter_bandpass_filt
 'get_data_cube',\
 'plot_sensor_values','plot_signal_pspec','visualize_time_series_prob','dim_reduction_visualization',\
 'plot_train_loss',\
-'shift_array','get_mv_preds','apply_mv_and_get_f1_score',\
+'preds_to_scores','get_scores',\
+'shift_array','get_mv_preds','apply_mv_and_get_scores',\
 'permute_class_blocks','permute_class_within_sub',\
 'get_log_reg_model','get_log_reg_f1','prepare_data_for_log_reg',\
 'get_transform_module','tm_template_weights_to_model','model_weights_to_tm_template']
@@ -657,6 +658,49 @@ def plot_train_loss(train_history, fig_title,fig_fn):
     fig.savefig(fig_fn,dpi = 300)
     plt.close()
 
+# ~~~~~~~~ SCORING FUNCTIONS ~~~~~~~~
+
+def preds_to_scores(y_pred, y_true, score_list, average = 'weighted'):
+    """
+    use predictions and ground truth to compute indicated performance scores
+    """
+    # Get scores
+    out_scores = np.empty((0,0))
+    for score in score_list:
+        if score == 'f1':
+            score_val = f1_score(y_true,y_pred,average = average)
+        elif score == 'accuracy':
+            score_val = accuracy_score(y_true,y_pred)
+        else:
+            raise NotImplementedError
+        #stack
+        out_scores = np.hstack((out_scores,score_val)) if out_scores.size else score_val
+    return out_scores
+
+def get_scores(X, Y, model, score_list ,average = 'weighted', mask_value = -100):
+    """
+    Get indicated performance scores for a trained model. can mask out samples
+
+    Args:
+        X: 2D numpy array with shape [samples, features]
+        Y: 2D numpy array with shape [samples,classes]. one-hot coding of classes
+        model: trained model object
+        average: string argument for f1_score function. Usually 'macro' or 'weighted'
+        mask_value: value indicating which samples to mask out
+
+    Returns:
+        out_scores
+    """
+    # Mask out indices based on mask value
+    nonmasked_idxs = np.where(Y[:,0].flatten()!=mask_value)[0]
+    # Get target labels for non-masked timepoints
+    y_true = np.argmax(Y,1).flatten()[nonmasked_idxs]
+    # Get model predictions for non-masked timepoints
+    preds = model.predict(X)
+    y_pred = np.argmax(preds,1).flatten()[nonmasked_idxs]
+
+    return preds_to_scores(y_pred, y_true, score_list, average = average)
+
 
 # ~~~~~~~~ MAJORITY VOTING FUNCTIONS ~~~~~~~~
 
@@ -698,8 +742,12 @@ def get_mv_preds(X, model, n_votes):
 
     return y_pred_mv
 
-def apply_mv_and_get_f1_score(X, Y, subset_idxs, exclude,\
-                              scaler = None, model = None, n_votes = 5, average = 'weighted'):
+
+
+
+def apply_mv_and_get_scores(X, Y, subset_idxs, exclude,\
+                              scaler = None, model = None, n_votes = 5,\
+                             score_list = ['f1'],average = 'weighted'):
     """
         apply majority voting scheme after predicting output with model
         for this to make sense, adjacent samples should have been acquired at adjacent times
@@ -707,6 +755,7 @@ def apply_mv_and_get_f1_score(X, Y, subset_idxs, exclude,\
     if subset_idxs.size >0:
         # standardize and format original data
         X, Y, scaler = prepare_data_for_log_reg(X,Y, subset_idxs, [], train = False, scaler = scaler)
+    print(X.shape)
     #get majority voting prediction
     y_pred = get_mv_preds(X, model, n_votes= n_votes)+1
     # get grount-truth labels
@@ -714,9 +763,12 @@ def apply_mv_and_get_f1_score(X, Y, subset_idxs, exclude,\
 
     # exclude indicated conditions
     include_idxs = np.where(np.isin(y_true,exclude, invert = True))[0]
+    print(include_idxs.shape)
     y_true = y_true[include_idxs]
     y_pred = y_pred[include_idxs]
-    return f1_score(y_true,y_pred,average = average) #return f1 score
+
+    return preds_to_scores(y_pred, y_true, score_list, average = average)
+
 # ~~~~~~~~ DATA PERMUTATION FUNCTIONS ~~~~~~~~
 
 def permute_class_blocks(block_labels,class_labels):

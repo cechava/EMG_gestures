@@ -239,7 +239,7 @@ def log_reg_xsubject_test(data_folder, src_subject_id, nsubjects, nreps, lo_freq
     return results_df
 
 def log_reg_xsubject_transform_module_train_frac_subjects(feature_matrix, target_labels, sub_labels, block_labels, series_labels, exclude,\
-                                                         model_dict,n_train_splits = 4, n_val_splits = 2,\
+                                                         model_dict,score_list = ['f1'],n_train_splits = 4, n_val_splits = 2,\
                                                          verbose = 0, epochs = 40, batch_size = 2, mv = None,permute = False):
     """
     train and validate a logistic regression model with a transform module for domain adaptation. 
@@ -293,7 +293,8 @@ def log_reg_xsubject_transform_module_train_frac_subjects(feature_matrix, target
         # permute order in which subjects' data is used for training
         train_subs_perm = np.random.permutation(train_subs)
         #initialize empty list
-        train_f1_scores = np.empty((train_subs.size))
+        n_scores = len(score_list)
+        train_scores_all = np.empty((train_subs.size,n_scores))
 
         # --- Training Stage ---
         # Define model architecture
@@ -327,21 +328,23 @@ def log_reg_xsubject_transform_module_train_frac_subjects(feature_matrix, target
             print('Evaluate Model on Trained Data')
 
             if mv:
-                    #get f1 score after applying majority voting scheme to model predictions
-                    train_f1_scores[sub_idx]  = apply_mv_and_get_f1_score(feature_matrix, target_labels,\
-                                                                    np.intersect1d(np.where(sub_labels==train_sub)[0],train_idxs), exclude,\
-                                                                    scaler, model, mv)
+                #get f1 score after applying majority voting scheme to model predictions
+                train_scores_all[sub_idx,:] = apply_mv_and_get_scores(feature_matrix, target_labels,\
+                                                                np.intersect1d(np.where(sub_labels==train_sub)[0],train_idxs), exclude,\
+                                                                scaler, model, mv, score_list)
             else:
                 #get score for training data
-                train_f1_scores[sub_idx]  = get_log_reg_f1(X_cube_sub, Y_cube_sub, model)
+                train_scores_all[sub_idx,:] = get_scores(X_cube_sub, Y_cube_sub, model, score_list)
 
-        #put results in dataframe
-        results_df.append(pd.DataFrame({'F1_score':train_f1_scores,\
-                                        'Subject':train_subs_perm+1,\
-                                        'Fold':[split_count+1 for x in range(train_f1_scores.size)],\
-                                        'Type':['Train' for x in range(train_f1_scores.size)],\
-                                        }))
+        # #put results in dataframe
+        data_dict = {'Subject':train_subs_perm+1,\
+                     'Fold':[split_count+1 for x in range(train_subs_perm.size)],\
+                     'Type':['Train' for x in range(train_subs_perm.size)]}
 
+        for s_idx in range(n_scores):
+            data_dict['%s_score'%(score_list[s_idx])] = train_scores_all[:,s_idx]
+            
+        results_df.append(pd.DataFrame(data_dict))
 
         # --- Validation Stage ---
         #freeze top layers
@@ -362,8 +365,8 @@ def log_reg_xsubject_transform_module_train_frac_subjects(feature_matrix, target
             #stratify split to retain ratio of class labels
             kf = KFold(n_splits=n_val_splits,shuffle = True)
 
-            val_train_f1 = np.empty((n_val_splits,))
-            val_test_f1 = np.empty((n_val_splits,))
+            val_train_scores = np.empty((n_val_splits,n_scores))
+            val_test_scores = np.empty((n_val_splits,n_scores))
 
             #systematically use one fold of the data as a held-out test set
             for split_count_val, (series_train, series_test) in enumerate(kf.split(np.unique(test_series))):
@@ -372,9 +375,7 @@ def log_reg_xsubject_transform_module_train_frac_subjects(feature_matrix, target
                 series_train_idxs = np.where(test_series==series_train)[0]
                 X_train_cube_sub = X_cube_sub[series_train_idxs,:]
                 Y_train_cube_sub = Y_cube_sub[series_train_idxs,:]
-                if permute:
-                    perm_idxs = np.random.permutation(np.arange(Y_train_cube_sub.shape[0]))
-                    Y_train_cube_sub = Y_train_cube_sub[perm_idxs,:]
+ 
 
                 series_test_idxs = np.where(test_series==series_test)[0]
                 X_test_cube_sub = X_cube_sub[series_test_idxs,:]
@@ -391,36 +392,39 @@ def log_reg_xsubject_transform_module_train_frac_subjects(feature_matrix, target
                 #evaluate on training and testing
                 if mv:
                     #get f1 score after applying majority voting scheme to model predictions
-                    val_train_f1[split_count_val]  = apply_mv_and_get_f1_score(feature_matrix[test_idxs], target_labels[test_idxs],\
+                    val_train_scores[split_count_val,:]  = apply_mv_and_get_f1_scores(feature_matrix[test_idxs], target_labels[test_idxs],\
                                                                     np.where(series_labels[test_idxs]==series_train)[0], exclude,\
-                                                                    model = model, n_votes = mv, scaler = scaler)
-                    val_test_f1[split_count_val]  = apply_mv_and_get_f1_score(feature_matrix[test_idxs], target_labels[test_idxs],\
+                                                                    model = model, n_votes = mv, scaler = scaler, score_list = score_list)
+                    val_test_scores[split_count_val,:]  = apply_mv_and_get_scores(feature_matrix[test_idxs], target_labels[test_idxs],\
                                                                     np.where(series_labels[test_idxs]==series_test)[0], exclude,\
-                                                                    model = model, n_votes = mv, scaler = scaler)
+                                                                    model = model, n_votes = mv, scaler = scaler, score_list = score_list)
                 else:
-                    val_train_f1[split_count_val] = get_log_reg_f1(X_train_cube_sub, Y_train_cube_sub, model)
-                    val_test_f1[split_count_val] = get_log_reg_f1(X_test_cube_sub, Y_test_cube_sub, model)
+                    val_train_scores[split_count_val,:] = get_scores(X_train_cube_sub, Y_train_cube_sub, model, score_list)
+                    val_test_scores[split_count_val,:] = get_scores(X_test_cube_sub, Y_test_cube_sub, model, score_list)
 
 
             #put results in dataframe
-            results_df.append(pd.DataFrame({'F1_score':val_train_f1,\
-                                            'Subject':[test_sub+1 for x in range(val_train_f1.size)],\
-                                            'Fold':[split_count+1 for x in range(val_train_f1.size)],\
-                                            'Type':['Val_Train' for x in range(val_train_f1.size)],\
-                                            }))
-            
-            results_df.append(pd.DataFrame({'F1_score':val_test_f1,\
-                                            'Subject':[test_sub+1 for x in range(val_test_f1.size)],\
-                                            'Fold':[split_count+1 for x in range(val_test_f1.size)],\
-                                            'Type':['Val_Test' for x in range(val_test_f1.size)],\
-                                            }))
+            data_dict = {'Subject':[test_sub+1 for x in range(n_val_splits)],\
+                         'Fold':[split_count+1 for x in range(n_val_splits)],\
+                         'Type':['Val_Train' for x in range(n_val_splits)]}
+            for sidx in range(n_scores):
+                data_dict['%s_score'%(score_list[sidx])] = val_train_scores[:,sidx]
+            results_df.append(pd.DataFrame(data_dict))
 
+            data_dict = {'Subject':[test_sub+1 for x in range(n_val_splits)],\
+                         'Fold':[split_count+1 for x in range(n_val_splits)],\
+                         'Type':['Val_Test' for x in range(n_val_splits)]}
+            for sidx in range(n_scores):
+                data_dict['%s_score'%(score_list[sidx])] = val_test_scores[:,sidx]
+            results_df.append(pd.DataFrame(data_dict))
+
+            
     results_df = pd.concat(results_df,axis = 0)
 
     return results_df
 
 def log_reg_xsubject_transform_module_train_all_subjects(feature_matrix, target_labels, sub_labels, block_labels,\
-                                                         train_idxs, test_idxs, exclude, model_dict,\
+                                                         train_idxs, test_idxs, exclude, model_dict, score_list,\
                                                          figure_folder = '', model_folder = '', 
                                                          verbose = 0, epochs = 40, batch_size = 2, mv = None, permute = False):
     """
@@ -457,8 +461,9 @@ def log_reg_xsubject_transform_module_train_all_subjects(feature_matrix, target_
     subs_perm = np.random.permutation(subs)
 
     #initialize empty list
-    train_f1_scores = np.empty((subs.size))
-    test_f1_scores = np.empty((subs.size))
+    n_scores = len(score_list)
+    train_scores = np.empty((subs.size,n_scores))
+    test_scores = np.empty((subs.size,n_scores))
 
     # --- Training Stage ---
     # Define model architecture
@@ -502,31 +507,34 @@ def log_reg_xsubject_transform_module_train_all_subjects(feature_matrix, target_
 
         if mv:
             # get f1 score after applying majority voting scheme to model predictions
-            train_f1_scores[sub_idx]  = apply_mv_and_get_f1_score(feature_matrix, target_labels,\
+            train_scores[sub_idx,:]  = apply_mv_and_get_scores(feature_matrix, target_labels,\
                                                                 np.intersect1d(np.where(sub_labels==train_sub)[0],train_idxs), exclude,\
-                                                                scaler, model, mv)
+                                                                scaler, model, mv, score_list)
             if test_idxs.size>0:
-                test_f1_scores[sub_idx] = apply_mv_and_get_f1_score(feature_matrix, target_labels, \
+                test_scores[sub_idx,:] = apply_mv_and_get_scores(feature_matrix, target_labels, \
                                                                     np.intersect1d(np.where(sub_labels==train_sub)[0],test_idxs), exclude,\
-                                                                    scaler, model, mv)
+                                                                    scaler, model, mv, score_list)
         else:
             #get score for training data
-            train_f1_scores[sub_idx]  = get_log_reg_f1(X_cube_sub, Y_cube_sub, model)
+            train_scores[sub_idx,:]  = get_scores(X_cube_sub, Y_cube_sub, model, score_list)
             if test_idxs.size>0:
                 #get score for test data
                 test_sub_idxs = np.where(sub_labels_test == train_sub)[0]
-                test_f1_scores[sub_idx]  = get_log_reg_f1(X_test_cube[test_sub_idxs,:], Y_test_cube[test_sub_idxs,:], model)
+                test_scores[sub_idx,:]  = get_scores(X_test_cube[test_sub_idxs,:], Y_test_cube[test_sub_idxs,:], model, score_list)
 
     #put results in dataframe
-    results_df.append(pd.DataFrame({'F1_score':train_f1_scores,\
-                                    'Subject':subs_perm,\
-                                    'Type':['Train' for x in range(train_f1_scores.size)],\
-                                        }))
+    data_dict = {'Subject':subs_perm,\
+                 'Type':['Train' for x in range(subs_perm.size)]}
+    for sidx in range(n_scores):
+        data_dict['%s_score'%(score_list[sidx])] = train_scores[:,sidx]
+    results_df.append(pd.DataFrame(data_dict))
+
     if test_idxs.size>0:
-        results_df.append(pd.DataFrame({'F1_score':test_f1_scores,\
-                                        'Subject':subs_perm,\
-                                        'Type':['Train_val' for x in range(test_f1_scores.size)],\
-                                            }))
+            data_dict = {'Subject':subs_perm,\
+                         'Type':['Train_val' for x in range(subs_perm.size)]}
+            for sidx in range(n_scores):
+                data_dict['%s_score'%(score_list[sidx])] = test_scores[:,sidx]
+            results_df.append(pd.DataFrame(data_dict))
         
     results_df = pd.concat(results_df,axis = 0)
 
