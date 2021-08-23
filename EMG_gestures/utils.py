@@ -27,7 +27,7 @@ import h5py
 
 #ML packages
 from sklearn.linear_model import  LogisticRegression
-from sklearn.metrics import f1_score,make_scorer, log_loss
+from sklearn.metrics import accuracy_score, f1_score,make_scorer, log_loss
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import make_pipeline
