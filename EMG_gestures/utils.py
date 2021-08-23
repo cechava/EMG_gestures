@@ -46,7 +46,7 @@ __all__ = ['get_gesture_times','get_steady_samp_rate_data','butter_bandpass_filt
 'window_and_get_features','parse_data_blocks','get_file_data_for_classification','get_subject_data_for_classification',\
 'get_data_cube',\
 'plot_sensor_values','plot_signal_pspec','visualize_time_series_prob','dim_reduction_visualization',\
-'plot_train_loss',\
+'plot_train_loss','plot_training_history'\
 'preds_to_scores','get_scores',\
 'shift_array','get_mv_preds','apply_mv_and_get_scores',\
 'permute_class_blocks','permute_class_within_sub',\
@@ -658,6 +658,32 @@ def plot_train_loss(train_history, fig_title,fig_fn):
     fig.savefig(fig_fn,dpi = 300)
     plt.close()
 
+def plot_training_history(train_history, fig_title,fig_fn):
+    
+    #make dataframe
+    history_df = []
+    n_folds, n_epochs = train_history['loss'].shape
+    for f in range(n_folds):
+        history_df.append(pd.DataFrame({'Loss': train_history['loss'][f,:],\
+                        'Epoch':np.arange(n_epochs)+1,\
+                        'Fold':[f+1 for x in range(n_epochs)],\
+                        'Type':['Train' for x in range(n_epochs)]}))
+        history_df.append(pd.DataFrame({'Loss': train_history['val_loss'][f,:],\
+                        'Epoch':np.arange(n_epochs)+1,\
+                        'Fold':[f+1 for x in range(n_epochs)],\
+                        'Type':['Val' for x in range(n_epochs)]}))
+
+    history_df = pd.concat(history_df,axis = 0)
+
+
+    #make figure
+    sns.relplot(data=history_df, x = 'Epoch', y = 'Loss', col = 'Fold',col_wrap = 2, style = 'Type',\
+                style_order = ['Train','Val'],kind = 'line')
+    fig = plt.gcf()
+    fig.suptitle(fig_title, y = 1.05)
+    fig.savefig(fig_fn,dpi = 300)
+    plt.close()
+
 # ~~~~~~~~ SCORING FUNCTIONS ~~~~~~~~
 
 def preds_to_scores(y_pred, y_true, score_list, average = 'weighted'):
@@ -898,6 +924,9 @@ def prepare_data_for_log_reg(X,Y, select_idxs, exclude_labels, train = False,sca
     Y_cube = to_categorical(Y_cube-np.min(Y_cube))
 
     return X_cube, Y_cube, scaler
+
+
+
 
 # ~~~~~~~~ TRANSFORM MODULE FUNCTIONS ~~~~~~~~
 

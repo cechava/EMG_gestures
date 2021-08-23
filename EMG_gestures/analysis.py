@@ -45,6 +45,8 @@ from tensorflow.keras.utils import to_categorical
 from EMG_gestures.utils import *
 
 __all__ = ['within_subject_log_reg_performance','get_trained_model','evaluate_trained_log_reg','log_reg_xsubject_test',\
+'get_trained_model','evaluate_trained_log_reg','log_reg_xsubject_joint_data_train_frac_subjects',\
+'log_reg_xsubject_transform_module_train_all_subjects',\
 'log_reg_xsubject_transform_module_train_frac_subjects','log_reg_xsubject_transform_module_train_all_subjects']
 
 # ~~~~~~~~ LOGISTIC REGRESSION FUNCTIONS ~~~~~~~~
@@ -237,6 +239,173 @@ def log_reg_xsubject_test(data_folder, src_subject_id, nsubjects, nreps, lo_freq
     results_df = pd.concat(results_df, axis = 0).reset_index(drop = True)
 
     return results_df
+
+def get_trained_model(X, Y, train_idxs, exclude = [], model_dict = {},score_list = ['f1'], verbose = 0, epochs = 40, batch_size = 2,\
+                      validation_split = 0, mv = False):
+
+
+    if not model_dict:
+        model_dict = {'n_dense_pre':0, 'activation':''}
+
+    #exclude indicated labels
+    in_samples = np.where(np.isin(Y,exclude, invert = True))[0]
+    train_idxs_orig = train_idxs.copy()
+    train_idxs = np.intersect1d(train_idxs,in_samples)
+
+    #get training data cubes
+    X_train_cube, Y_train_cube, scaler = prepare_data_for_log_reg(X,Y, train_idxs, exclude, train = True)
+
+    #testfor equal number of samples
+    assert X_train_cube.shape[0] == Y_train_cube.shape[0]
+    n_features, n_outputs = X_train_cube.shape[1], Y_train_cube.shape[1]
+    #setting timestep dimension to None 
+    model = get_log_reg_model((n_features,),n_outputs, n_dense_pre=model_dict['n_dense_pre'], activation=model_dict['activation'])
+    model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+    #model.summary
+
+    print('Training Model')
+    # fit network
+    history = model.fit(X_train_cube, Y_train_cube,validation_split = validation_split, \
+                        epochs=epochs, batch_size=batch_size, verbose=verbose)
+    # # evaluate trained network
+    print('Evaluate Model on Trained Data')
+
+    if mv:
+        train_scores = apply_mv_and_get_scores(X, Y, train_idxs_orig, exclude,\
+                                               scaler, model, mv, score_list)
+    else:
+        #get score for training data
+        train_scores = get_scores(X_train_cube, Y_train_cube, model, score_list)
+    return train_scores, model, scaler, history
+    
+
+def evaluate_trained_log_reg(X, Y, test_idxs, exclude, trained_model, score_list = ['f1'],scaler = None, mv = None):
+    #exclude indicated labels
+    test_idxs_orig = test_idxs.copy()
+    in_samples = np.where(np.isin(Y,exclude, invert = True))[0]
+    test_idxs = np.intersect1d(test_idxs,in_samples)
+
+    print('Evaluate Model')
+    if mv:
+         test_scores = apply_mv_and_get_scores(X, Y, test_idxs_orig, exclude,\
+                                               scaler, trained_model, mv, score_list)
+    else:
+
+        # get testing data cubes
+        X_test_cube, Y_test_cube, scaler = prepare_data_for_log_reg(X,Y, test_idxs, exclude, train = False, scaler = scaler)
+        #get score for testing data
+        test_scores = get_scores(X_test_cube, Y_test_cube, trained_model, score_list)
+    return test_scores
+
+def log_reg_xsubject_joint_data_train_frac_subjects(feature_matrix, target_labels, sub_labels, block_labels, exclude,\
+                                                    model_dict, score_list, n_splits = 4,\
+                                                    verbose = 0, epochs = 40, batch_size = 2, validation_split = 0.1, mv = False, permute = False):
+    """
+    train and validate a logistic regression model using data from multiple subjects 
+    train and validate model performance by splitting subjects into a train and test set
+    """
+
+    #subjects in list. there are the units over which we will do train/test split
+    subs = np.unique(sub_labels)
+
+    if permute:
+        #permute while ignoring excluded blocks
+        target_labels = permute_class_within_sub(target_labels, block_labels, sub_labels, exclude)
+
+
+    #initialize object for k-fold cross-validation
+    kf = KFold(n_splits=n_splits,shuffle = True)
+    #initialize empty arrays
+
+    n_scores = len(score_list)
+    train_scores_all = np.empty((n_splits,n_scores))
+    test_scores_all = np.empty((n_splits,n_scores))
+    train_history = dict()
+    train_history['loss'] = np.empty((0,0))
+    train_history['val_loss'] = np.empty((0,0))
+
+    for split_count, (subs_train_idxs, subs_test_idxs) in enumerate(kf.split(subs)):
+        print('Split Count: %i'% (split_count+1))
+
+        #get train and test indices
+        train_subs = subs[subs_train_idxs]
+        test_subs = subs[subs_test_idxs]
+        train_idxs = np.where(np.isin(sub_labels,train_subs, invert = False))[0]
+        test_idxs = np.where(np.isin(sub_labels,test_subs, invert = False))[0]
+
+        #get trained model
+        train_scores, trained_model, scaler, history = get_trained_model(feature_matrix, target_labels, train_idxs, exclude,\
+                                                                         model_dict, score_list,\
+                                                                         verbose = verbose, epochs = epochs, batch_size = batch_size,\
+                                                                         validation_split = validation_split,\
+                                                                         mv = mv)
+        #Evaluating on held-out subjects
+        test_scores = evaluate_trained_log_reg(feature_matrix, target_labels, test_idxs, exclude, trained_model, score_list,scaler, mv = mv)
+    
+        #put scores in array
+        train_scores_all[split_count,:] = train_scores
+        test_scores_all[split_count,:] = test_scores
+
+        #append history
+        train_history['loss'] = np.vstack((train_history['loss'],history.history['loss'])) if train_history['loss'].size else np.array(history.history['loss'])
+        if validation_split>0:
+            train_history['val_loss'] = np.vstack((train_history['val_loss'],history.history['val_loss'])) if train_history['val_loss'].size else np.array(history.history['val_loss']) 
+    
+    #put in data frame
+    results_df = []
+    data_dict = {'Fold':np.arange(n_splits)+1,\
+                  'Type':['Train' for x in range(n_splits)]}
+    for sidx in range(n_scores):
+        data_dict['%s_score'%(score_list[sidx])] = train_scores_all[:,sidx]
+    results_df.append(pd.DataFrame(data_dict))
+
+    data_dict = {'Fold':np.arange(n_splits)+1,\
+                 'Type':['Test' for x in range(n_splits)]}
+    for sidx in range(n_scores):
+        data_dict['%s_score'%(score_list[sidx])] = test_scores_all[:,sidx]
+    results_df.append(pd.DataFrame(data_dict))
+
+    results_df = pd.concat(results_df,axis = 0)
+
+def log_reg_xsubject_joint_data_train_all_subjects(feature_matrix, target_labels, sub_labels, block_labels, exclude,\
+                                                    model_dict, score_list,
+                                                    verbose = 0, epochs = 40, batch_size = 2, validation_split = 0.1, mv = False, permute = False):
+    """
+    train and validate a logistic regression model using data from multiple subjects 
+    train on all subjects
+    """
+
+    #subjects in list. there are the units over which we will do train/test split
+    subs = np.unique(sub_labels)
+
+    if permute:
+        #permute while ignoring excluded blocks
+        target_labels = permute_class_within_sub(target_labels, block_labels, sub_labels, exclude)
+
+
+
+    n_scores = len(score_list)
+
+
+    train_subs = subs
+    train_idxs = np.where(np.isin(sub_labels,train_subs, invert = False))[0]
+    #get trained model
+    train_scores, trained_model, scaler, history = get_trained_model(feature_matrix, target_labels, train_idxs, exclude,\
+                                                                        model_dict, score_list,\
+                                                                        verbose = verbose, epochs = epochs, batch_size = batch_size,\
+                                                                        validation_split = validation_split,\
+                                                                        mv = mv)
+
+
+    #put in data frame
+    data_dict = {'Type':'Train'}
+    for sidx in range(n_scores):
+        data_dict['%s_score'%(score_list[sidx])] = train_scores[sidx]
+    results_df = pd.DataFrame(data_dict, index = [0])
+
+
+    return results_df, history, trained_model, scaler
+
 
 def log_reg_xsubject_transform_module_train_frac_subjects(feature_matrix, target_labels, sub_labels, block_labels, series_labels, exclude,\
                                                          model_dict,score_list = ['f1'],n_train_splits = 4, n_val_splits = 2,\
@@ -543,3 +712,4 @@ def log_reg_xsubject_transform_module_train_all_subjects(feature_matrix, target_
         model_fn = os.path.join(model_folder, 'trained_model_all_train_data_permuted_%s.h5'%(str(permute)))
         keras.models.save_model(model, model_fn, save_format= 'h5')
     return results_df, scaler
+
