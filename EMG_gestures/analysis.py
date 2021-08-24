@@ -52,17 +52,20 @@ __all__ = ['within_subject_log_reg_performance','get_trained_model','evaluate_tr
 # ~~~~~~~~ LOGISTIC REGRESSION FUNCTIONS ~~~~~~~~
 
 
-def within_subject_log_reg_performance(X, Y, series_labels, exclude,  verbose = 0, epochs = 40, batch_size = 2, mv = False, permute = False):
+
+
+def within_subject_log_reg_performance(X, Y, series_labels, exclude, score_list = ['f1'], verbose = 0, epochs = 40, batch_size = 2, mv = None, permute = False):
     """
     Train and test performance of a logisitc regression model within the same subject
     """
-
+    
     #initialize object for k-fold cross-validation
     n_splits = np.unique(series_labels).size
     kf = KFold(n_splits=n_splits,shuffle = True)
     #initialize empty arrays
-    train_f1_scores = np.empty((n_splits,))
-    test_f1_scores = np.empty((n_splits,))
+    n_scores = len(score_list)
+    train_scores = np.empty((n_splits,n_scores))
+    test_scores = np.empty((n_splits,n_scores))
 
     for split_count, (series_train, series_test) in enumerate(kf.split(np.unique(series_labels))):
         print('Split Count: %i'% (split_count+1))
@@ -71,9 +74,6 @@ def within_subject_log_reg_performance(X, Y, series_labels, exclude,  verbose = 
         test_idxs = np.where(series_labels==series_test)[0]
         #get training data cubes
         X_train_cube, Y_train_cube, scaler = prepare_data_for_log_reg(X,Y, train_idxs, exclude, train = True)
-        if permute:
-            perm_idxs = np.random.permutation(np.arange(Y_train_cube.shape[0]))
-            Y_train_cube = Y_train_cube[perm_idxs,:]
 
         n_features, n_outputs = X_train_cube.shape[1], Y_train_cube.shape[1]
 
@@ -91,35 +91,24 @@ def within_subject_log_reg_performance(X, Y, series_labels, exclude,  verbose = 
         
 
         if mv:
-            # get testing data cubes
-            X_test_cube, Y_test_cube, scaler = prepare_data_for_log_reg(X,Y, train_idxs, [], train = False, scaler = scaler)
-            y_pred = get_mv_preds(X_test_cube, model, n_votes= 5)+1
-            y_true = np.squeeze(np.argmax(Y_test_cube,1))
-            include_idxs = np.where(np.isin(y_true,exclude, invert = True))[0]
-            y_true = y_true[include_idxs]
-            y_pred = y_pred[include_idxs]
-            train_f1 = f1_score(y_true,y_pred,average = 'weighted')
-
-            # get testing data cubes
-            X_test_cube, Y_test_cube, scaler = prepare_data_for_log_reg(X,Y, test_idxs, [], train = False, scaler = scaler)
-            y_pred = get_mv_preds(X_test_cube, model, n_votes= 5)+1
-            y_true = np.squeeze(np.argmax(Y_test_cube,1))
-            include_idxs = np.where(np.isin(y_true,exclude, invert = True))[0]
-            y_true = y_true[include_idxs]
-            y_pred = y_pred[include_idxs]
-            test_f1 = f1_score(y_true,y_pred,average = 'weighted')
-        else:
             #get score for training data
-            train_f1 = get_log_reg_f1(X_train_cube, Y_train_cube, model)
-            # get testing data cubes
-            X_test_cube, Y_test_cube, scaler = prepare_data_for_log_reg(X,Y, test_idxs, exclude, train = False, scaler = scaler)
+            train_scores[split_count,:] = apply_mv_and_get_scores(X, Y, train_idxs, exclude,\
+                                                                  scaler, model, mv, score_list)
             #get score for testing data
-            test_f1 = get_log_reg_f1(X_test_cube, Y_test_cube, model)
-        #put scores in array
-        train_f1_scores[split_count] = train_f1
-        test_f1_scores[split_count] = test_f1
+            test_scores[split_count,:] = apply_mv_and_get_scores(X, Y, test_idxs, exclude,\
+                                                                  scaler, model, mv, score_list)
 
-    return train_f1_scores, test_f1_scores
+        else:
+
+            #get score for training data
+            train_scores[split_count,:] = get_scores(X_train_cube, Y_train_cube, model, score_list)
+
+            #get score for testing data
+            X_test_cube, Y_test_cube, scaler = prepare_data_for_log_reg(X,Y, test_idxs, exclude, train = False, scaler = scaler)
+            test_scores[split_count,:] = get_scores(X_test_cube, Y_test_cube, model, score_list)
+
+
+    return train_scores, test_scores
 
 
 def get_trained_model(X, Y, train_idxs, exclude = [], model_dict = {},score_list = ['f1'], verbose = 0, epochs = 40, batch_size = 2,\
@@ -524,7 +513,7 @@ def log_reg_xsubject_transform_module_train_frac_subjects(feature_matrix, target
                 #evaluate on training and testing
                 if mv:
                     #get f1 score after applying majority voting scheme to model predictions
-                    val_train_scores[split_count_val,:]  = apply_mv_and_get_f1_scores(feature_matrix[test_idxs], target_labels[test_idxs],\
+                    val_train_scores[split_count_val,:]  = apply_mv_and_get_scores(feature_matrix[test_idxs], target_labels[test_idxs],\
                                                                     np.where(series_labels[test_idxs]==series_train)[0], exclude,\
                                                                     model = model, n_votes = mv, scaler = scaler, score_list = score_list)
                     val_test_scores[split_count_val,:]  = apply_mv_and_get_scores(feature_matrix[test_idxs], target_labels[test_idxs],\
