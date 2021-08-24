@@ -46,7 +46,7 @@ __all__ = ['get_gesture_times','get_steady_samp_rate_data','butter_bandpass_filt
 'window_and_get_features','parse_data_blocks','get_file_data_for_classification','get_subject_data_for_classification',\
 'get_data_cube',\
 'plot_sensor_values','plot_signal_pspec','visualize_time_series_prob','dim_reduction_visualization',\
-'plot_train_loss','plot_training_history'\
+'plot_train_loss','plot_training_history',\
 'preds_to_scores','get_scores',\
 'shift_array','get_mv_preds','apply_mv_and_get_scores',\
 'permute_class_blocks','permute_class_within_sub',\

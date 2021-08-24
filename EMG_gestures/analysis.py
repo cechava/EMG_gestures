@@ -366,6 +366,8 @@ def log_reg_xsubject_joint_data_train_frac_subjects(feature_matrix, target_label
     results_df.append(pd.DataFrame(data_dict))
 
     results_df = pd.concat(results_df,axis = 0)
+    
+    return results_df, train_history
 
 def log_reg_xsubject_joint_data_train_all_subjects(feature_matrix, target_labels, sub_labels, block_labels, exclude,\
                                                     model_dict, score_list,
