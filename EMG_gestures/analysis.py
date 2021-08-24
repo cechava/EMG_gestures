@@ -45,7 +45,7 @@ from tensorflow.keras.utils import to_categorical
 from EMG_gestures.utils import *
 
 __all__ = ['within_subject_log_reg_performance','get_trained_model','evaluate_trained_log_reg','log_reg_xsubject_test',\
-'get_trained_model','evaluate_trained_log_reg','log_reg_xsubject_joint_data_train_frac_subjects',\
+'log_reg_xsubject_joint_data_train_frac_subjects',\
 'log_reg_xsubject_transform_module_train_all_subjects',\
 'log_reg_xsubject_transform_module_train_frac_subjects','log_reg_xsubject_transform_module_train_all_subjects']
 
@@ -122,124 +122,6 @@ def within_subject_log_reg_performance(X, Y, series_labels, exclude,  verbose = 
     return train_f1_scores, test_f1_scores
 
 
-def get_trained_model(X, Y, train_idxs, exclude, verbose = 0, epochs = 40, batch_size = 2, mv = False, permute = False):
-
-    #get training data cubes
-    X_train_cube, Y_train_cube, scaler = prepare_data_for_log_reg(X,Y, train_idxs, exclude, train = True)
-    if permute:
-        perm_idxs = np.random.permutation(np.arange(Y_train_cube.shape[0]))
-        Y_train_cube = Y_train_cube[perm_idxs,:]
-
-    n_features, n_outputs = X_train_cube.shape[1], Y_train_cube.shape[1]
-
-    #setting timestep dimension to None 
-    model = get_log_reg_model((n_features,),n_outputs)
-    model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
-    #model.summary
-
-    print('Training Model')
-    # fit network
-    history = model.fit(X_train_cube, Y_train_cube, epochs=epochs, batch_size=batch_size, verbose=verbose)
-    # # evaluate trained network
-    print('Evaluate Model on Trained Data')
-
-    if mv:
-        # get testing data cubes
-        X_test_cube, Y_test_cube, scaler = prepare_data_for_log_reg(X,Y, train_idxs, [], train = False, scaler = scaler)
-        y_pred = get_mv_preds(X_test_cube, model, n_votes= 5)+1
-        y_true = np.squeeze(np.argmax(Y_test_cube,1))
-        include_idxs = np.where(np.isin(y_true,exclude, invert = True))[0]
-        y_true = y_true[include_idxs]
-        y_pred = y_pred[include_idxs]
-        train_f1 = f1_score(y_true,y_pred,average = 'weighted')
-
-    else:
-        #get score for training data
-        train_f1 = get_log_reg_f1(X_train_cube, Y_train_cube, model)
-    return train_f1, model, scaler, history
-
-def evaluate_trained_log_reg(X, Y, test_idxs, exclude, trained_model, scaler, mv):
-
-    print('Evaluate Model')
-    if mv:
-        # get testing data cubes
-        X_test_cube, Y_test_cube, scaler = prepare_data_for_log_reg(X,Y, test_idxs, [], train = False, scaler = scaler)
-        y_pred = get_mv_preds(X_test_cube, trained_model, n_votes= 5)+1
-        y_true = np.squeeze(np.argmax(Y_test_cube,1))
-        include_idxs = np.where(np.isin(y_true,exclude, invert = True))[0]
-        y_true = y_true[include_idxs]
-        y_pred = y_pred[include_idxs]
-        test_f1 = f1_score(y_true,y_pred,average = 'weighted')
-    else:
-
-        # get testing data cubes
-        X_test_cube, Y_test_cube, scaler = prepare_data_for_log_reg(X,Y, test_idxs, exclude, train = False, scaler = scaler)
-        #get score for testing data
-        test_f1 = get_log_reg_f1(X_test_cube, Y_test_cube, trained_model)
-    return test_f1
-
-def log_reg_xsubject_test(data_folder, src_subject_id, nsubjects, nreps, lo_freq, hi_freq, win_size, step, exclude, \
-                          verbose = 0, epochs = 40, batch_size = 2, mv = False, permute = False):
-    
-    
-    subject_folder = os.path.join(data_folder,'%02d'%(src_subject_id))
-    print('=======================')
-    print(subject_folder)
-
-    # Process data and get features 
-    #get features across segments and corresponding info
-    feature_matrix_src, target_labels_src, window_tstamps_src, \
-    block_labels_src, series_labels_src = get_subject_data_for_classification(subject_folder, lo_freq, hi_freq, \
-                                                                win_size, step)
-    train_idxs = np.arange(target_labels_src.size)
-    np.random.seed(1)#for reproducibility
-
-    results_df = []#initialize empty array for dataframes
-    train_f1_scores = np.empty((nreps,))
-    for rep in range(nreps):
-
-        print('Subject %d|Rep %d'%(src_subject_id, rep+1))
-        train_f1, trained_model, scaler, train_history = get_trained_model(feature_matrix_src, target_labels_src, train_idxs, exclude,\
-                                                                        verbose = verbose, epochs = epochs, batch_size = batch_size,\
-                                                                        mv = mv, permute = permute)
-        train_f1_scores[rep] = train_f1
-        # test on all other subjects
-        # initialize empty lists
-        test_f1_scores = np.empty((0,))
-        targ_subject_list = []
-        for targ_subject_id in range(1,nsubjects+1):
-            if targ_subject_id != src_subject_id:
-
-                subject_folder = os.path.join(data_folder,'%02d'%(targ_subject_id))
-                print('Target Subject :%s'%(subject_folder))
-
-                # Process data and get features 
-                #get features across segments and corresponding info
-                feature_matrix_targ, target_labels_targ, window_tstamps_targ, \
-                block_labels_targ, series_labels_targ = get_subject_data_for_classification(subject_folder, lo_freq, hi_freq, \
-                                                                        win_size, step)
-                test_idxs = np.arange(target_labels_targ.size)
-
-                test_f1 = evaluate_trained_log_reg(feature_matrix_targ, target_labels_targ, test_idxs, exclude, trained_model, scaler, mv = mv)
-                #append to list
-                test_f1_scores = np.hstack((test_f1_scores, test_f1))
-                targ_subject_list.append(targ_subject_id)
-
-        #put test results in dataframe
-        results_df.append(pd.DataFrame({'F1_score':test_f1_scores,\
-                                                    'Type':['Test' for x in range(test_f1_scores.size)],\
-                                                    'Rep':[rep+1 for x in range(test_f1_scores.size)],\
-                                                'Test_Subject':targ_subject_list}))
-    #put training results in dataframe
-    results_df.append(pd.DataFrame({'F1_score':train_f1_scores,\
-                                    'Type':['Train' for x in range(train_f1_scores.size)],\
-                                    'Rep': np.arange(nreps)+1,\
-                                    'Test_Subject':[src_subject_id for x in range(train_f1_scores.size)]}))
-    
-    results_df = pd.concat(results_df, axis = 0).reset_index(drop = True)
-
-    return results_df
-
 def get_trained_model(X, Y, train_idxs, exclude = [], model_dict = {},score_list = ['f1'], verbose = 0, epochs = 40, batch_size = 2,\
                       validation_split = 0, mv = False):
 
@@ -277,7 +159,6 @@ def get_trained_model(X, Y, train_idxs, exclude = [], model_dict = {},score_list
         #get score for training data
         train_scores = get_scores(X_train_cube, Y_train_cube, model, score_list)
     return train_scores, model, scaler, history
-    
 
 def evaluate_trained_log_reg(X, Y, test_idxs, exclude, trained_model, score_list = ['f1'],scaler = None, mv = None):
     #exclude indicated labels
@@ -296,6 +177,86 @@ def evaluate_trained_log_reg(X, Y, test_idxs, exclude, trained_model, score_list
         #get score for testing data
         test_scores = get_scores(X_test_cube, Y_test_cube, trained_model, score_list)
     return test_scores
+
+def log_reg_xsubject_test(data_folder, src_subject_id, nsubjects, nreps, lo_freq, hi_freq, win_size, step, exclude, score_list = ['f1'], \
+                          verbose = 0, epochs = 40, batch_size = 2, mv = False, permute = False):
+    
+    
+    subject_folder = os.path.join(data_folder,'%02d'%(src_subject_id))
+    print('=======================')
+    print(subject_folder)
+
+    # Process data and get features 
+    #get features across segments and corresponding info
+    feature_matrix_src, target_labels_src, window_tstamps_src, \
+    block_labels_src, series_labels_src = get_subject_data_for_classification(subject_folder, lo_freq, hi_freq, \
+                                                                win_size, step)
+    target_labels_src_orig = target_labels_src.copy()#keep originals before permuting
+    train_idxs = np.arange(target_labels_src.size)
+    np.random.seed(1)#for reproducibility
+
+    results_df = []#initialize empty array for dataframes
+    n_scores = len(score_list)
+    train_scores_all = np.empty((nreps,n_scores))
+    for rep in range(nreps):
+        if permute:
+            #permute while ignoring excluded blocks
+            target_labels_src = permute_class_within_sub(target_labels_src_orig, block_labels_src, np.ones((target_labels_src.size,)), exclude)
+
+        print('Subject %d|Rep %d'%(src_subject_id, rep+1))
+        train_scores, trained_model, scaler, train_history = get_trained_model(feature_matrix_src, target_labels_src, train_idxs, exclude,\
+                                                                               score_list = score_list,\
+                                                                        verbose = verbose, epochs = epochs, batch_size = batch_size,\
+                                                                        mv = mv)
+        train_scores_all[rep,:] = train_scores
+        # test on all other subjects
+        # initialize empty lists
+        test_scores_all = np.empty((0,0))
+        targ_subject_list = []
+        for targ_subject_id in range(1,nsubjects+1):
+            if targ_subject_id != src_subject_id:
+
+                subject_folder = os.path.join(data_folder,'%02d'%(targ_subject_id))
+                print('Target Subject :%s'%(subject_folder))
+
+                # Process data and get features 
+                #get features across segments and corresponding info
+                feature_matrix_targ, target_labels_targ, window_tstamps_targ, \
+                block_labels_targ, series_labels_targ = get_subject_data_for_classification(subject_folder, lo_freq, hi_freq, \
+                                                                        win_size, step)
+                test_idxs = np.arange(target_labels_targ.size)
+
+                test_scores = evaluate_trained_log_reg(feature_matrix_targ, target_labels_targ, test_idxs, exclude, trained_model,\
+                                                       score_list, scaler, mv = mv)
+                #append to list
+                test_scores_all = np.vstack((test_scores_all, test_scores)) if test_scores_all.size else test_scores
+                targ_subject_list.append(targ_subject_id)
+
+        #put testing results in dataframe
+        data_dict = {'Type':['Test' for x in range(nsubjects-1)],\
+                     'Rep':[rep+1 for x in range(nsubjects-1)],\
+                     'Test_Subject':targ_subject_list}
+        for sidx in range(n_scores):
+            data_dict['%s_score'%(score_list[sidx])] = test_scores_all[:,sidx]
+        results_df.append(pd.DataFrame(data_dict))
+
+
+    # #put training results in dataframe
+    data_dict = {'Type':['Train' for x in range(nreps)],\
+                 'Rep':[rep+1 for x in range(nreps)],\
+                 'Test_Subject':[src_subject_id for x in range(nreps)]}
+    for sidx in range(n_scores):
+        data_dict['%s_score'%(score_list[sidx])] = train_scores_all[:,sidx]
+    results_df.append(pd.DataFrame(data_dict))
+
+    
+    results_df = pd.concat(results_df, axis = 0).reset_index(drop = True)
+
+    return results_df
+
+    
+
+
 
 def log_reg_xsubject_joint_data_train_frac_subjects(feature_matrix, target_labels, sub_labels, block_labels, exclude,\
                                                     model_dict, score_list, n_splits = 4,\
@@ -366,7 +327,7 @@ def log_reg_xsubject_joint_data_train_frac_subjects(feature_matrix, target_label
     results_df.append(pd.DataFrame(data_dict))
 
     results_df = pd.concat(results_df,axis = 0)
-    
+
     return results_df, train_history
 
 def log_reg_xsubject_joint_data_train_all_subjects(feature_matrix, target_labels, sub_labels, block_labels, exclude,\
