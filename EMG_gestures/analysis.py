@@ -27,7 +27,7 @@ import h5py
 
 #ML packages
 from sklearn.linear_model import  LogisticRegression
-from sklearn.metrics import f1_score,make_scorer, log_loss
+from sklearn.metrics import accuracy_score, f1_score,make_scorer, log_loss
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import make_pipeline
@@ -47,14 +47,15 @@ from EMG_gestures.utils import *
 __all__ = ['within_subject_log_reg_performance','get_trained_model','evaluate_trained_log_reg','log_reg_xsubject_test',\
 'log_reg_xsubject_joint_data_train_frac_subjects',\
 'log_reg_xsubject_transform_module_train_all_subjects',\
-'log_reg_xsubject_transform_module_train_frac_subjects','log_reg_xsubject_transform_module_train_all_subjects']
+'log_reg_xsubject_transform_module_train_frac_subjects','log_reg_xsubject_transform_module_train_all_subjects',\
+'within_subject_rnn_performance','evaluate_trained_rnn','get_trained_rnn_model','rnn_xsubject_test']
 
 # ~~~~~~~~ LOGISTIC REGRESSION FUNCTIONS ~~~~~~~~
 
 
 
 
-def within_subject_log_reg_performance(X, Y, series_labels, exclude, score_list = ['f1'], verbose = 0, epochs = 40, batch_size = 2, mv = None, permute = False):
+def within_subject_log_reg_performance(X, Y, series_labels, exclude, score_list = ['f1'], verbose = 0, epochs = 40, batch_size = 2, mv = None):
     """
     Train and test performance of a logisitc regression model within the same subject
     """
@@ -232,7 +233,7 @@ def log_reg_xsubject_test(data_folder, src_subject_id, nsubjects, nreps, lo_freq
 
     # #put training results in dataframe
     data_dict = {'Type':['Train' for x in range(nreps)],\
-                 'Rep':[rep+1 for x in range(nreps)],\
+                 'Rep':[x+1 for x in range(nreps)],\
                  'Test_Subject':[src_subject_id for x in range(nreps)]}
     for sidx in range(n_scores):
         data_dict['%s_score'%(score_list[sidx])] = train_scores_all[:,sidx]
@@ -664,4 +665,202 @@ def log_reg_xsubject_transform_module_train_all_subjects(feature_matrix, target_
         model_fn = os.path.join(model_folder, 'trained_model_all_train_data_permuted_%s.h5'%(str(permute)))
         keras.models.save_model(model, model_fn, save_format= 'h5')
     return results_df, scaler
+
+def within_subject_rnn_performance(X, Y, block_labels, series_labels, exclude, score_list = ['f1'],n_shuffled_sets = 10,\
+                                   verbose = 0, epochs = 40, batch_size = 2, mv = None):
+    """
+    Train and test performance of a RNN model within the same subject
+    """
+
+
+    #initialize object for k-fold cross-validation
+    n_splits = np.unique(series_labels).size
+    kf = KFold(n_splits=n_splits,shuffle = True)
+    #initialize empty arrays
+    n_scores = len(score_list)
+    train_scores = np.empty((n_splits,n_scores))
+    test_scores = np.empty((n_splits,n_scores))
+
+    for split_count, (series_train, series_test) in enumerate(kf.split(np.unique(series_labels))):
+        print('Split Count: %i'% (split_count+1))
+        #get train and test idxs
+        train_idxs = np.where(series_labels==series_train)[0]
+        test_idxs = np.where(series_labels==series_test)[0]
+        #get training data cube
+        X_train_cube, Y_train_cube, scaler = prepare_data_for_RNN(X, Y, train_idxs, exclude, train = True,\
+                                                    block_labels = block_labels, nsets = n_shuffled_sets)
+        n_features, n_outputs = X_train_cube.shape[2], Y_train_cube.shape[2]
+
+        # #setting timestep dimension to None 
+        model = get_rnn_model((None,n_features,),n_outputs)
+        model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+        #model.summary()
+        print('Training Model')
+        # fit network
+        history = model.fit(X_train_cube, Y_train_cube, epochs=epochs, batch_size=batch_size, verbose=verbose)
+
+        # # evaluate trained network
+        print('Evaluate Model')
+
+        if mv:
+            #get score for training data
+            train_scores[split_count,:] = apply_mv_and_get_scores(X, Y, train_idxs, exclude,\
+                                                                    scaler, model, mv, score_list, rnn = True)
+            #get score for testing data
+            test_scores[split_count,:] = apply_mv_and_get_scores(X, Y, test_idxs, exclude,\
+                                                                    scaler, model, mv, score_list, rnn = True)
+
+        else:
+
+            #get score for training data
+            train_scores[split_count,:] = get_scores(X_train_cube, Y_train_cube, model, score_list, rnn = True)
+
+            #get score for testing data
+            X_test_cube, Y_test_cube, scaler = prepare_data_for_RNN(X, Y, test_idxs, exclude, train = False, scaler = scaler)
+            test_scores[split_count,:] = get_scores(X_test_cube, Y_test_cube, model, score_list, rnn = True)
+    return train_scores, test_scores
+
+def evaluate_trained_rnn(X, Y, test_idxs, exclude, trained_model, score_list = ['f1'],scaler = None, mv = None):
+    #exclude indicated labels
+    test_idxs_orig = test_idxs.copy()
+    in_samples = np.where(np.isin(Y,exclude, invert = True))[0]
+    test_idxs = np.intersect1d(test_idxs,in_samples)
+
+    print('Evaluate Model')
+    if mv:
+         test_scores = apply_mv_and_get_scores(X, Y, test_idxs_orig, exclude,\
+                                               scaler, trained_model, mv, score_list, rnn = True)
+    else:
+
+        # get testing data cubes
+        X_test_cube, Y_test_cube, scaler = prepare_data_for_RNN(X,Y, test_idxs, exclude, train = False, scaler = scaler)
+        #get score for testing data
+        test_scores = get_scores(X_test_cube, Y_test_cube, trained_model, score_list, rnn = True)
+    return test_scores
+
+def get_trained_rnn_model(X, Y, train_idxs, block_labels, nsets = 10, exclude = [], model_dict = {},score_list = ['f1'], verbose = 0, epochs = 40, batch_size = 2,\
+                      validation_split = 0, mv = False):
+
+
+    if not model_dict:
+        model_dict = {'n_dense_pre':0,'n_grus':24, 'activation':'','n_dense_post':0}
+
+    #exclude indicated labels
+    in_samples = np.where(np.isin(Y,exclude, invert = True))[0]
+    train_idxs_orig = train_idxs.copy()
+    train_idxs = np.intersect1d(train_idxs,in_samples)
+
+    #get training data cubes
+    X_train_cube, Y_train_cube, scaler = prepare_data_for_RNN(X,Y, train_idxs, exclude, train = True,\
+                                                              block_labels = block_labels, nsets = nsets)
+
+    #testfor equal number of samples
+    assert X_train_cube.shape[0] == Y_train_cube.shape[0]
+    #testfor equal number of timepoints
+    assert X_train_cube.shape[1] == Y_train_cube.shape[1]
+
+    n_features, n_outputs = X_train_cube.shape[2], Y_train_cube.shape[2]
+    #setting timestep dimension to None 
+    model = get_rnn_model((None,n_features,),n_outputs,n_dense_pre=model_dict['n_dense_pre'], n_dense_post=model_dict['n_dense_post'],\
+                          n_grus = model_dict['n_grus'], activation=model_dict['activation'])
+    model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+    #model.summary
+
+    print('Training Model')
+    # fit network
+    history = model.fit(X_train_cube, Y_train_cube,validation_split = validation_split, \
+                        epochs=epochs, batch_size=batch_size, verbose=verbose)
+    # # evaluate trained network
+    print('Evaluate Model on Trained Data')
+
+    if mv:
+        train_scores = apply_mv_and_get_scores(X, Y, train_idxs_orig, exclude,\
+                                               scaler, model, mv, score_list, rnn = True)
+    else:
+        #get score for training data
+        train_scores = get_scores(X_train_cube, Y_train_cube, model, score_list, rnn = True)
+    return train_scores, model, scaler, history
+
+def rnn_xsubject_test(data_folder, src_subject_id, nsubjects, nreps, lo_freq, hi_freq, win_size, step, exclude, score_list = ['f1'], \
+                          nsets_training = 10,verbose = 0, epochs = 40, batch_size = 2, mv = False, permute = False):
+    """
+    Test naive cross-subject generalization of an RNN model
+    Train an RNN model on data from one subject; test on all other subjects
+    """
+
+
+    subject_folder = os.path.join(data_folder,'%02d'%(src_subject_id))
+    print('=======================')
+    print(subject_folder)
+
+    # Process data and get features 
+    #get features across segments and corresponding info
+    feature_matrix_src, target_labels_src, window_tstamps_src, \
+    block_labels_src, series_labels_src = get_subject_data_for_classification(subject_folder, lo_freq, hi_freq, \
+                                                                win_size, step)
+    target_labels_src_orig = target_labels_src.copy()#keep originals before permuting
+    train_idxs = np.arange(target_labels_src.size)
+
+    np.random.seed(1)#for reproducibility
+
+    results_df = []#initialize empty array for dataframes
+    n_scores = len(score_list)
+    train_scores_all = np.empty((nreps,n_scores))
+
+    for rep in range(nreps):
+        if permute:
+            #permute while ignoring excluded blocks
+            target_labels_src = permute_class_within_sub(target_labels_src_orig, block_labels_src, np.ones((target_labels_src.size,)), exclude)
+
+        print('Subject %d|Rep %d'%(src_subject_id, rep+1))
+        train_scores, trained_model, scaler, train_history = get_trained_rnn_model(feature_matrix_src, target_labels_src, train_idxs, block_labels_src,
+                                                                                        nsets_training,exclude,\
+                                                                                score_list = score_list,\
+                                                                        verbose = verbose, epochs = epochs, batch_size = batch_size,\
+                                                                        mv = mv)
+        train_scores_all[rep,:] = train_scores
+
+        # test on all other subjects
+        # initialize empty lists
+        test_scores_all = np.empty((0,0))
+        targ_subject_list = []
+        for targ_subject_id in range(1,nsubjects+1):
+            if targ_subject_id != src_subject_id:
+
+                subject_folder = os.path.join(data_folder,'%02d'%(targ_subject_id))
+                print('Target Subject :%s'%(subject_folder))
+
+                # Process data and get features 
+                #get features across segments and corresponding info
+                feature_matrix_targ, target_labels_targ, window_tstamps_targ, \
+                block_labels_targ, series_labels_targ = get_subject_data_for_classification(subject_folder, lo_freq, hi_freq, \
+                                                                        win_size, step)
+                test_idxs = np.arange(target_labels_targ.size)
+
+                test_scores = evaluate_trained_rnn(feature_matrix_targ, target_labels_targ, test_idxs, exclude, trained_model,\
+                                                        score_list, scaler, mv = mv)
+                #append to list
+                test_scores_all = np.vstack((test_scores_all, test_scores)) if test_scores_all.size else test_scores
+                targ_subject_list.append(targ_subject_id)
+
+            #put testing results in dataframe
+        data_dict = {'Type':['Test' for x in range(nsubjects-1)],\
+                        'Rep':[rep+1 for x in range(nsubjects-1)],\
+                        'Test_Subject':targ_subject_list}
+        for sidx in range(n_scores):
+            data_dict['%s_score'%(score_list[sidx])] = test_scores_all[:,sidx]
+        results_df.append(pd.DataFrame(data_dict))
+
+    # #put training results in dataframe
+    data_dict = {'Type':['Train' for x in range(nreps)],\
+                    'Rep':[x+1 for x in range(nreps)],\
+                    'Test_Subject':[src_subject_id for x in range(nreps)]}
+    for sidx in range(n_scores):
+        data_dict['%s_score'%(score_list[sidx])] = train_scores_all[:,sidx]
+    results_df.append(pd.DataFrame(data_dict))
+
+
+    results_df = pd.concat(results_df, axis = 0).reset_index(drop = True)
+
+    return results_df
 

@@ -51,7 +51,8 @@ __all__ = ['get_gesture_times','get_steady_samp_rate_data','butter_bandpass_filt
 'shift_array','get_mv_preds','apply_mv_and_get_scores',\
 'permute_class_blocks','permute_class_within_sub',\
 'get_log_reg_model','get_log_reg_f1','prepare_data_for_log_reg',\
-'get_transform_module','tm_template_weights_to_model','model_weights_to_tm_template']
+'get_transform_module','tm_template_weights_to_model','model_weights_to_tm_template',\
+'get_rnn_model','prepare_data_for_RNN','get_train_cube']
 
 
 # ~~~~~~~ DATA WRANGLING FUNCTIONS ~~~~~~~
@@ -703,7 +704,7 @@ def preds_to_scores(y_pred, y_true, score_list, average = 'weighted'):
         out_scores = np.hstack((out_scores,score_val)) if out_scores.size else score_val
     return out_scores
 
-def get_scores(X, Y, model, score_list ,average = 'weighted', mask_value = -100):
+def get_scores(X, Y, model, score_list ,average = 'weighted', mask_value = -100, rnn = False):
     """
     Get indicated performance scores for a trained model. can mask out samples
 
@@ -718,15 +719,24 @@ def get_scores(X, Y, model, score_list ,average = 'weighted', mask_value = -100)
         out_scores
     """
     # Mask out indices based on mask value
-    nonmasked_idxs = np.where(Y[:,0].flatten()!=mask_value)[0]
-    # Get target labels for non-masked timepoints
-    y_true = np.argmax(Y,1).flatten()[nonmasked_idxs]
-    # Get model predictions for non-masked timepoints
-    preds = model.predict(X)
-    y_pred = np.argmax(preds,1).flatten()[nonmasked_idxs]
+    if rnn:
+        # Mask out indices based on mask value
+        nonmasked_idxs = np.where(X[:,:,0].flatten()!=mask_value)[0]
+        # Get target labels for non-masked timepoints
+        y_true = np.argmax(Y,2).flatten()[nonmasked_idxs]
+        # Get model predictions for non-masked timepoints
+        preds = model.predict(X)
+        y_pred = np.argmax(preds,2).flatten()[nonmasked_idxs]
+
+    else:
+        nonmasked_idxs = np.where(Y[:,0].flatten()!=mask_value)[0]
+        # Get target labels for non-masked timepoints
+        y_true = np.argmax(Y,1).flatten()[nonmasked_idxs]
+        # Get model predictions for non-masked timepoints
+        preds = model.predict(X)
+        y_pred = np.argmax(preds,1).flatten()[nonmasked_idxs]
 
     return preds_to_scores(y_pred, y_true, score_list, average = average)
-
 
 # ~~~~~~~~ MAJORITY VOTING FUNCTIONS ~~~~~~~~
 
@@ -773,23 +783,37 @@ def get_mv_preds(X, model, n_votes):
 
 def apply_mv_and_get_scores(X, Y, subset_idxs, exclude,\
                               scaler = None, model = None, n_votes = 5,\
-                             score_list = ['f1'],average = 'weighted'):
+                             score_list = ['f1'],average = 'weighted', rnn = False):
     """
         apply majority voting scheme after predicting output with model
         for this to make sense, adjacent samples should have been acquired at adjacent times
+
+        TODO: double-check output for non-RNN input
     """
-    if subset_idxs.size >0:
-        # standardize and format original data
-        X, Y, scaler = prepare_data_for_log_reg(X,Y, subset_idxs, [], train = False, scaler = scaler)
-    print(X.shape)
-    #get majority voting prediction
-    y_pred = get_mv_preds(X, model, n_votes= n_votes)+1
-    # get grount-truth labels
-    y_true = np.squeeze(np.argmax(Y,1))
+    if rnn:
+        if subset_idxs.size >0:
+            # standardize and format original data
+            X, Y, scaler =  prepare_data_for_RNN(X, Y, subset_idxs, [], train = False, scaler = scaler)
+        #get majority voting prediction
+        y_pred = np.empty((0,))
+        for i in range(X.shape[0]):
+            preds = get_mv_preds(np.expand_dims(X[i,:,:],0), model, n_votes= n_votes)
+            y_pred = np.hstack((y_preds, preds)) if y_pred.size else preds
+        # get grount-truth labels
+        y_true = np.argmax(Y,2).flatten()
+            
+    else:
+        if subset_idxs.size >0:
+            # standardize and format original data
+            X, Y, scaler = prepare_data_for_log_reg(X,Y, subset_idxs, [], train = False, scaler = scaler)
+        #get majority voting prediction
+        y_pred = get_mv_preds(X, model, n_votes= n_votes)+1
+        # get grount-truth labels
+        y_true = np.squeeze(np.argmax(Y,1))
 
     # exclude indicated conditions
     include_idxs = np.where(np.isin(y_true,exclude, invert = True))[0]
-    print(include_idxs.shape)
+
     y_true = y_true[include_idxs]
     y_pred = y_pred[include_idxs]
 
@@ -955,6 +979,127 @@ def model_weights_to_tm_template(transform_module, model):
 
 
 # # ~~~~~~~~ RNN CLASSIFIER FUNCTIONS ~~~~~~~~
+
+def get_rnn_model(input_shape, n_outputs, n_grus = 24, n_dense_pre = 0, n_dense_post = 0, drop_prob = 0.5, activation = 'tanh', mask_value = -100):
+    """
+    Create simple RNN model
+    
+    Args:
+        input_shape
+        n_outputs: number of output classes
+        mask_value: value indicating which timepoints to mask out
+            
+    Returns:
+        model
+    """
+    
+    #define model architecture
+    X_input = Input(shape = input_shape)
+    X = Masking(mask_value=mask_value)(X_input)
+    for n in range(n_dense_pre):
+        X = TimeDistributed(Dense(input_shape[1],activation = activation))(X)
+        X = Dropout(drop_prob)(X)
+    X = GRU(n_grus, return_sequences= True, stateful = False)(X)
+    X = Dropout(drop_prob)(X)
+    for n in range(n_dense_post):
+        X = TimeDistributed(Dense(n_grus,activation = activation))(X)
+        X = Dropout(drop_prob)(X)
+    X = TimeDistributed(Dense(n_outputs,activation = 'softmax'))(X)
+    model = Model(inputs = X_input, outputs = X)
+    return model
+
+
+def prepare_data_for_RNN(X, Y, select_idxs, exclude, magic_value = -100, \
+                         train = False, block_labels = [], nsets = 10,scaler = None):
+    """
+    function to prepare data in format expected by tensorflow functions
+    """
+
+    #get matrices subsets
+    X =  X[select_idxs,:]
+    Y = Y[select_idxs]
+    
+
+    if train:
+        block_labels = block_labels[select_idxs]
+        #standardize across each feature dimension
+        scaler = StandardScaler()
+        scaler = scaler.fit(X)
+        X = scaler.transform(X)
+        # get training cube
+        X_cube, Y_cube = get_train_cube(X, Y, block_labels, exclude, nsets = nsets)
+    else:
+        #for testing data, we want to use same transform as was fit to training data
+        X = scaler.transform(X)
+
+
+        #replace excluded values with magic value
+        exclude_idxs = np.where(np.isin(Y,exclude))[0]
+        include_idxs = np.where(np.isin(Y,exclude, invert = True))[0]
+
+        #one-hot encoding of class labels
+        keep_cols = np.arange(np.max(Y)+1).astype('int')
+        keep_cols[np.isin(keep_cols, exclude, invert = True)]
+        Y_cube = to_categorical(Y)[:,keep_cols]
+
+        X[exclude_idxs,:] = magic_value
+        Y_cube[exclude_idxs,:] = magic_value
+
+        #batch-major format
+        X_cube = np.expand_dims(X,0)
+        Y_cube = np.expand_dims(Y_cube,0)
+
+    return X_cube, Y_cube, scaler
+
+def get_train_cube(X, Y, block_labels, exclude, nsets = 10, magic_value = -100):
+    """
+    generate train data cube by shuffling order of blocks, subsequent blank block for each labeled block [taking advantage of structure in data]
+    """
+
+    #intialize empty array
+    X_train_cube = np.empty((0,0,0))
+    Y_train_cube = np.empty((0,0,0))
+
+    for s in range(nsets):
+
+        #shuffle block order, keep corresponding labels
+        blocks = np.array([k for k,g in groupby(block_labels)])
+        classes = np.array([k for k,g in groupby(Y)])
+
+        include_blocks = np.where(np.isin(classes,exclude, invert = True))[0]
+        exclude_blocks= np.where(np.isin(classes,exclude, invert = False))[0]
+
+        shuffled_blocks = blocks.copy()
+        shuffled_blocks[include_blocks] = np.random.permutation(blocks[include_blocks])
+        shuffled_blocks[exclude_blocks] = np.random.permutation(blocks[exclude_blocks])
+
+        Y_blocks_shuffled = np.empty((0,))
+        X_blocks_shuffled = np.empty((0,0))
+        for b in shuffled_blocks:
+            block_idxs = np.where(block_labels==b)[0]
+            Y_blocks_shuffled = np.hstack((Y_blocks_shuffled,Y[block_idxs]))
+            X_blocks_shuffled = np.vstack((X_blocks_shuffled,X[block_idxs,:])) if X_blocks_shuffled.size else X[block_idxs,:]
+
+        #replace excluded values with magic value
+        exclude_idxs = np.where(np.isin(Y_blocks_shuffled,exclude))[0]
+        include_idxs = np.where(np.isin(Y_blocks_shuffled,exclude, invert = True))[0]
+    #   #one-hot encoding of class labels
+        keep_cols = np.arange(np.max(Y)+1).astype('int')
+        keep_cols[np.isin(keep_cols, exclude, invert = True)]
+        Y_blocks_shuffled = to_categorical(Y_blocks_shuffled)[:,keep_cols]
+        X_blocks_shuffled[exclude_idxs,:] = magic_value
+        Y_blocks_shuffled[exclude_idxs,:] = magic_value
+
+        # stack batches
+        X_train_cube = np.dstack((X_train_cube, X_blocks_shuffled.T)) if X_train_cube.size else X_blocks_shuffled.T
+        Y_train_cube = np.dstack((Y_train_cube, Y_blocks_shuffled.T)) if Y_train_cube.size else Y_blocks_shuffled.T
+
+    #swap for batch-major axes arrangement
+    X_train_cube = np.swapaxes(X_train_cube,0,2)
+    Y_train_cube = np.swapaxes(Y_train_cube,0,2)
+
+    return X_train_cube, Y_train_cube
+
 # def get_data_cube(X, Y, window_blocks, train = True, scaler = None, magic_value = -100):
 #     """
 #     Create data cube for use with Keras RNN. Standardize data then pad and reshape data to have
