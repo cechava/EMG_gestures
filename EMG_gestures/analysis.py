@@ -864,3 +864,308 @@ def rnn_xsubject_test(data_folder, src_subject_id, nsubjects, nreps, lo_freq, hi
 
     return results_df
 
+def rnn_xsubject_joint_data_train_frac_subjects(feature_matrix, target_labels, sub_labels, block_labels, exclude,\
+                                                    model_dict, score_list, n_splits = 4, nsets_training = 10,\
+                                                    verbose = 0, epochs = 40, batch_size = 2, validation_split = 0.1, mv = False, permute = False):
+    """
+    train and validate a RNN model using data from multiple subjects 
+    train and validate model performance by splitting subjects into a train and test set
+    """
+
+    #subjects in list. there are the units over which we will do train/test split
+    subs = np.unique(sub_labels)
+
+    if permute:
+        #permute while ignoring excluded blocks
+        target_labels = permute_class_within_sub(target_labels, block_labels, sub_labels, exclude)
+
+
+    #initialize object for k-fold cross-validation
+    kf = KFold(n_splits=n_splits,shuffle = True)
+    #initialize empty arrays
+
+    n_scores = len(score_list)
+    train_scores_all = np.empty((n_splits,n_scores))
+    test_scores_all = np.empty((n_splits,n_scores))
+    train_history = dict()
+    train_history['loss'] = np.empty((0,0))
+    train_history['val_loss'] = np.empty((0,0))
+
+    for split_count, (subs_train_idxs, subs_test_idxs) in enumerate(kf.split(subs)):
+        print('Split Count: %i'% (split_count+1))
+
+        #get train and test indices
+        train_subs = subs[subs_train_idxs]
+        test_subs = subs[subs_test_idxs]
+        train_idxs = np.where(np.isin(sub_labels,train_subs, invert = False))[0]
+        test_idxs = np.where(np.isin(sub_labels,test_subs, invert = False))[0]
+
+        #get trained model
+        train_scores, trained_model, scaler, history = get_trained_rnn_model(feature_matrix, target_labels, train_idxs, block_labels, nsets_training,\
+                                                                            exclude, model_dict, score_list,\
+                                                                            verbose = verbose, epochs = epochs, batch_size = batch_size,\
+                                                                            validation_split = validation_split,\
+                                                                            mv = mv)
+        #Evaluating on held-out subjects
+        test_scores = evaluate_trained_rnn(feature_matrix, target_labels, test_idxs, exclude, trained_model, score_list,scaler, mv = mv)
+
+        #put scores in array
+        train_scores_all[split_count,:] = train_scores
+        test_scores_all[split_count,:] = test_scores
+
+        #append history
+        train_history['loss'] = np.vstack((train_history['loss'],history.history['loss'])) if train_history['loss'].size else np.array(history.history['loss'])
+        if validation_split>0:
+            train_history['val_loss'] = np.vstack((train_history['val_loss'],history.history['val_loss'])) if train_history['val_loss'].size else np.array(history.history['val_loss']) 
+
+    #put in data frame
+    results_df = []
+    data_dict = {'Fold':np.arange(n_splits)+1,\
+                    'Type':['Train' for x in range(n_splits)]}
+    for sidx in range(n_scores):
+        data_dict['%s_score'%(score_list[sidx])] = train_scores_all[:,sidx]
+    results_df.append(pd.DataFrame(data_dict))
+
+    data_dict = {'Fold':np.arange(n_splits)+1,\
+                    'Type':['Test' for x in range(n_splits)]}
+    for sidx in range(n_scores):
+        data_dict['%s_score'%(score_list[sidx])] = test_scores_all[:,sidx]
+    results_df.append(pd.DataFrame(data_dict))
+
+    results_df = pd.concat(results_df,axis = 0)
+
+    return results_df, train_history
+
+def rnn_xsubject_joint_data_train_all_subjects(feature_matrix, target_labels, sub_labels, block_labels, exclude,\
+                                                    model_dict, score_list, nsets_training = 10,\
+                                                    verbose = 0, epochs = 40, batch_size = 2, validation_split = 0.1, mv = False, permute = False):
+    """
+    train and validate a RNN model using data from multiple subjects 
+    train on all subjects
+    """
+
+    #subjects in list. there are the units over which we will do train/test split
+    subs = np.unique(sub_labels)
+
+    if permute:
+        #permute while ignoring excluded blocks
+        target_labels = permute_class_within_sub(target_labels, block_labels, sub_labels, exclude)
+
+
+    n_scores = len(score_list)
+    train_subs = subs
+    train_idxs = np.where(np.isin(sub_labels,train_subs, invert = False))[0]
+
+    #get trained model
+    train_scores, trained_model, scaler, history = get_trained_rnn_model(feature_matrix, target_labels, train_idxs, block_labels, nsets_training,\
+                                                                        exclude, model_dict, score_list,\
+                                                                        verbose = verbose, epochs = epochs, batch_size = batch_size,\
+                                                                        validation_split = validation_split,\
+                                                                        mv = mv)
+
+
+    #put in data frame
+    data_dict = {'Type':'Train'}
+    for sidx in range(n_scores):
+        data_dict['%s_score'%(score_list[sidx])] = train_scores[sidx]
+    results_df = pd.DataFrame(data_dict, index = [0])
+
+
+    return results_df, history, trained_model, scaler
+
+def rnn_xsubject_transform_module_train_frac_subjects(feature_matrix, target_labels, sub_labels, block_labels, series_labels, exclude,\
+                                                         model_dict,score_list = ['f1'],n_train_splits = 4, n_val_splits = 2,\
+                                                          nsets_training = 10,verbose = 0, epochs = 40, batch_size = 2, mv = None,permute = False):
+    """
+    train and validate an RNN model with a transform module for domain adaptation. 
+    train and validate model performance by splitting subjects into a train and test set
+    """
+
+    #default values
+    if 'n_dense_post' not in model_dict.keys():
+        model_dict['n_dense_post'] = 0
+    if 'n_grus' not in model_dict.keys():
+        model_dict['n_grus'] = 24
+
+    if permute:
+        #permute while ignoring excluded blocks
+        target_labels = permute_class_within_sub(target_labels, block_labels, sub_labels, exclude)
+
+    results_df = []
+    #subjects in list. there are the units over which we will do train/test split
+    subs = np.unique(sub_labels)
+
+    #exclude indicated labels
+    in_samples = np.where(np.isin(target_labels,exclude, invert = True))[0]
+
+    #initialize object for k-fold cross-validation
+    kf = KFold(n_splits=n_train_splits,shuffle = True)
+
+
+    for split_count, (subs_train_idxs, subs_test_idxs) in enumerate(kf.split(subs)):
+        print('-------Split Count: %i-------'% (split_count+1))
+        #get train and test indices
+        train_subs = subs[subs_train_idxs]
+        test_subs = subs[subs_test_idxs]
+        train_idxs = np.where(np.isin(sub_labels,train_subs, invert = False))[0]
+        test_idxs = np.where(np.isin(sub_labels,test_subs, invert = False))[0]
+
+        #get train and test indices
+        train_subs = subs[subs_train_idxs]
+        test_subs = subs[subs_test_idxs]
+        train_idxs = np.where(np.isin(sub_labels,train_subs, invert = False))[0]
+        test_idxs = np.where(np.isin(sub_labels,test_subs, invert = False))[0]
+    
+        #get training data cubes
+        X_train_cube, Y_train_cube, scaler = prepare_data_for_RNN(feature_matrix, target_labels, train_idxs, exclude, train = True,\
+                                                                    block_labels = block_labels, nsets = nsets_training)
+        sub_labels_train = sub_labels[np.intersect1d(train_idxs,in_samples)]
+
+        #testfor equal number of samples
+        assert X_train_cube.shape[0] == Y_train_cube.shape[0]
+        #testfor equal number of timepoints
+        assert X_train_cube.shape[1] == Y_train_cube.shape[1]
+        n_features, n_outputs = X_train_cube.shape[2], Y_train_cube.shape[2]
+
+        # get testing data cubes
+        X_test_cube, Y_test_cube, scaler = prepare_data_for_RNN(feature_matrix, target_labels, test_idxs, exclude, train = False, scaler = scaler)
+
+        sub_labels_test = sub_labels[np.intersect1d(test_idxs,in_samples)]
+        series_labels_test = series_labels[np.intersect1d(test_idxs,in_samples)]
+
+        # permute order in which subjects' data is used for training
+        train_subs_perm = np.random.permutation(train_subs)
+        #initialize empty list
+        n_scores = len(score_list)
+        train_scores_all = np.empty((train_subs.size,n_scores))
+
+        # --- Training Stage ---
+        # Define model architecture
+
+        #setting timestep dimension to None 
+        model = get_rnn_model((None,n_features,),n_outputs,n_dense_pre=model_dict['n_dense_pre'], n_dense_post=model_dict['n_dense_post'],\
+                            n_grus = model_dict['n_grus'], activation=model_dict['activation'])
+        model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+        #model.summary()
+
+        # # Get transform module template
+        transform_module_template = get_transform_module(model, Input(shape = (None,n_features)),3 + model_dict['n_dense_post'])
+
+        # iterate thorugh subjects' data
+        for sub_idx, train_sub in enumerate(train_subs_perm):
+            print('Training: Subject %02d out of %02d'%(sub_idx+1, train_subs.size))
+            # get subject-specific samples
+            train_sub_idxs = np.where(sub_labels_train == train_sub)[0]
+            X_cube_sub = X_train_cube[:,train_sub_idxs,:]
+            Y_cube_sub = Y_train_cube[:,train_sub_idxs,]
+
+            # initialize weights of the transform module
+            model = tm_template_weights_to_model(transform_module_template, model)
+
+            print('Training Model')
+            # fit network
+            history = model.fit(X_cube_sub, Y_cube_sub, epochs=epochs, batch_size=batch_size, verbose=verbose)
+
+            #copy weights to a transfer module template, save if wanted
+            trained_transfer_module = model_weights_to_tm_template(transform_module_template, model)
+            # # evaluate trained network
+            print('Evaluate Model on Trained Data')
+
+            if mv:
+                #get f1 score after applying majority voting scheme to model predictions
+                train_scores_all[sub_idx,:] = apply_mv_and_get_scores(feature_matrix, target_labels,\
+                                                                np.intersect1d(np.where(sub_labels==train_sub)[0],train_idxs), exclude,\
+                                                                scaler, model, mv, score_list, rnn = True)
+            else:
+                #get score for training data
+                train_scores_all[sub_idx,:] = get_scores(X_cube_sub, Y_cube_sub, model, score_list, rnn = True)
+
+        # #put results in dataframe
+        data_dict = {'Subject':train_subs_perm+1,\
+                        'Fold':[split_count+1 for x in range(train_subs_perm.size)],\
+                        'Type':['Train' for x in range(train_subs_perm.size)]}
+
+        for s_idx in range(n_scores):
+            data_dict['%s_score'%(score_list[s_idx])] = train_scores_all[:,s_idx]
+            
+        results_df.append(pd.DataFrame(data_dict))
+
+        # --- Validation Stage ---
+        #freeze top layers
+        for layer in model.layers[-3-(2*model_dict['n_dense_post']):]:
+            layer.trainable = False
+
+        # iterate through test subjects
+        for sub_idx, test_sub in enumerate(test_subs):
+            print('Validation: Subject %02d out of %02d'%(sub_idx+1, test_subs.size))
+
+            #get relevant subject samples
+            test_sub_idxs = np.where(sub_labels_test == test_sub)[0]
+            test_series = series_labels_test[test_sub_idxs]
+            
+            X_cube_sub = X_test_cube[:,test_sub_idxs,:]
+            Y_cube_sub = Y_test_cube[:,test_sub_idxs,]
+            test_sub_labels = np.argmax(Y_cube_sub,1)
+
+            #stratify split to retain ratio of class labels
+            kf = KFold(n_splits=n_val_splits,shuffle = True)
+
+            val_train_scores = np.empty((n_val_splits,n_scores))
+            val_test_scores = np.empty((n_val_splits,n_scores))
+
+            #systematically use one fold of the data as a held-out test set
+            for split_count_val, (series_train, series_test) in enumerate(kf.split(np.unique(test_series))):
+                
+                #split data cubes into train and test subsets
+                series_train_idxs = np.where(test_series==series_train)[0]
+                X_train_cube_sub = X_cube_sub[:,series_train_idxs,:]
+                Y_train_cube_sub = Y_cube_sub[:,series_train_idxs,:]
+
+
+                series_test_idxs = np.where(test_series==series_test)[0]
+                X_test_cube_sub = X_cube_sub[:,series_test_idxs,:]
+                Y_test_cube_sub = Y_cube_sub[:,series_test_idxs,:]
+
+                #initialize transform module
+                model = tm_template_weights_to_model(transform_module_template, model)
+                #train
+                model.fit(X_train_cube_sub, Y_train_cube_sub, epochs=epochs, batch_size=batch_size, verbose=verbose)
+
+                #copy weights to a transfer module template, save if wanted
+                trained_transfer_module = model_weights_to_tm_template(transform_module_template, model)
+
+                #evaluate on training and testing
+                if mv:
+                    #get f1 score after applying majority voting scheme to model predictions
+                    val_train_scores[split_count_val,:]  = apply_mv_and_get_scores(feature_matrix[test_idxs], target_labels[test_idxs],\
+                                                                    np.where(series_labels[test_idxs]==series_train)[0], exclude,\
+                                                                    model = model, n_votes = mv, scaler = scaler, score_list = score_list, rnn = True)
+                    val_test_scores[split_count_val,:]  = apply_mv_and_get_scores(feature_matrix[test_idxs], target_labels[test_idxs],\
+                                                                    np.where(series_labels[test_idxs]==series_test)[0], exclude,\
+                                                                    model = model, n_votes = mv, scaler = scaler, score_list = score_list, rnn = True)
+                else:
+                    val_train_scores[split_count_val,:] = get_scores(X_train_cube_sub, Y_train_cube_sub, model, score_list, rnn = True)
+                    val_test_scores[split_count_val,:] = get_scores(X_test_cube_sub, Y_test_cube_sub, model, score_list, rnn = True)
+
+
+            #put results in dataframe
+            data_dict = {'Subject':[test_sub+1 for x in range(n_val_splits)],\
+                            'Fold':[split_count+1 for x in range(n_val_splits)],\
+                            'Type':['Val_Train' for x in range(n_val_splits)]}
+            for sidx in range(n_scores):
+                data_dict['%s_score'%(score_list[sidx])] = val_train_scores[:,sidx]
+            results_df.append(pd.DataFrame(data_dict))
+
+            data_dict = {'Subject':[test_sub+1 for x in range(n_val_splits)],\
+                            'Fold':[split_count+1 for x in range(n_val_splits)],\
+                            'Type':['Val_Test' for x in range(n_val_splits)]}
+            for sidx in range(n_scores):
+                data_dict['%s_score'%(score_list[sidx])] = val_test_scores[:,sidx]
+            results_df.append(pd.DataFrame(data_dict))
+
+            
+    results_df = pd.concat(results_df,axis = 0)
+
+    return results_df
+
+
