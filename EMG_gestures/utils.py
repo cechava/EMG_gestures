@@ -45,6 +45,7 @@ from tensorflow.keras.utils import to_categorical
 __all__ = ['get_gesture_times','get_steady_samp_rate_data','butter_bandpass_filter','get_window_features',\
 'window_and_get_features','parse_data_blocks','get_file_data_for_classification','get_subject_data_for_classification',\
 'get_data_cube',\
+'make_meshgrid','plot_contours',\
 'plot_sensor_values','plot_signal_pspec','visualize_time_series_prob','dim_reduction_visualization',\
 'plot_train_loss','plot_training_history',\
 'preds_to_scores','get_scores',\
@@ -401,7 +402,33 @@ def get_data_cube(X, window_blocks, train = True, scaler = None, magic_value = -
     
     return X_cube, scaler
 
+def results_to_df(df, n_splits, score_list, scores_array, type_label):
+    """"
+    Append results to list for df conversion
+    """
+    data_dict = {'Type':[type_label for x in range(n_splits)],\
+                 'Fold':np.arange(n_splits)+1}
+    for sidx in range(len(score_list)):
+        data_dict['%s_score'%(score_list[sidx])] = scores_array[:,sidx]
+    df.append(pd.DataFrame(data_dict))
+    
+    return df
+
 #~~~~~ VISUALIZATION FUNCTIONS ~~~~~~
+
+def make_meshgrid(x, y, h=.02):
+    x_min, x_max = x.min() - 1, x.max() + 1
+    y_min, y_max = y.min() - 1, y.max() + 1
+    xx, yy = np.meshgrid(np.arange(x_min, x_max, h), np.arange(y_min, y_max, h))
+    return xx, yy
+
+def plot_contours(ax, model, xx, yy, **params):
+    tmp = np.c_[xx.ravel(), yy.ravel()]
+    Z = np.argmax(model.predict(tmp),1)
+    Z = Z.reshape(xx.shape)
+    out = ax.contourf(xx, yy, Z, **params)
+    return out
+
 
 def plot_sensor_values(data_fn, x_limits = []):
     """

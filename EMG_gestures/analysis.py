@@ -43,11 +43,13 @@ from tensorflow. keras.layers import Dense, Activation, Dropout, Input,  TimeDis
 from tensorflow.keras.utils import to_categorical
 
 from EMG_gestures.utils import *
+from EMG_gestures.models import DANN
 
 __all__ = ['within_subject_log_reg_performance','get_trained_model','evaluate_trained_log_reg','log_reg_xsubject_test',\
 'log_reg_xsubject_joint_data_train_frac_subjects',\
 'log_reg_xsubject_transform_module_train_all_subjects',\
 'log_reg_xsubject_transform_module_train_frac_subjects','log_reg_xsubject_transform_module_train_all_subjects',\
+'DANN_test',\
 'within_subject_rnn_performance','evaluate_trained_rnn','get_trained_rnn_model','rnn_xsubject_test']
 
 # ~~~~~~~~ LOGISTIC REGRESSION FUNCTIONS ~~~~~~~~
@@ -665,6 +667,146 @@ def log_reg_xsubject_transform_module_train_all_subjects(feature_matrix, target_
         model_fn = os.path.join(model_folder, 'trained_model_all_train_data_permuted_%s.h5'%(str(permute)))
         keras.models.save_model(model, model_fn, save_format= 'h5')
     return results_df, scaler
+
+
+def DANN_test(source_X, source_Y, target_X, target_Y, score_list, n_splits, epochs, batch_size,\
+              permute = False):
+
+    if permute:
+        #scramble class labels
+        source_Y = np.random.permutation(source_Y)
+        target_Y = np.random.permutation(target_Y)
+        
+    #put together labels
+    all_X =  np.vstack((source_X,target_X))
+    all_Y = np.hstack((source_Y, target_Y))
+    
+    domain_Y = np.hstack((np.ones(source_X.shape[0],)*0,np.ones(source_X.shape[0],)*1))#source_label
+
+
+    skf = StratifiedKFold(n_splits=n_splits)
+
+    #initialize empty arrays
+    n_scores = len(score_list)
+
+    source_train_scores = np.empty((n_splits,n_scores))
+    source_test_scores = np.empty((n_splits,n_scores))
+
+    naive_target_train_scores = np.empty((n_splits,n_scores))
+    naive_target_test_scores = np.empty((n_splits,n_scores))
+
+    adapt_source_test_scores  = np.empty((n_splits,n_scores))
+    adapt_target_train_scores  = np.empty((n_splits,n_scores))
+    adapt_target_test_scores  = np.empty((n_splits,n_scores))
+
+    revealed_source_train_scores = np.empty((n_splits,n_scores))
+    revealed_source_test_scores = np.empty((n_splits,n_scores))
+    revealed_target_train_scores = np.empty((n_splits,n_scores))
+    revealed_target_test_scores = np.empty((n_splits,n_scores))
+
+    #re-code so that stratified split preserves both label and comain fractions
+    dummy_Y = all_Y+(domain_Y*(np.max(all_Y)+1))
+
+    for split_count,(train_idxs, test_idxs) in enumerate(skf.split(all_X, dummy_Y)):
+        print('Split Count: %d'%(split_count+1))
+
+        #get indices
+        source_train_idxs =  np.intersect1d(train_idxs,np.where(dummy_Y<2)[0])
+        source_test_idxs = np.intersect1d(test_idxs,np.where(dummy_Y<2)[0])
+        target_train_idxs = np.intersect1d(train_idxs,np.where(dummy_Y>=2)[0])
+        target_test_idxs = np.intersect1d(test_idxs,np.where(dummy_Y>=2)[0])
+
+        #prepare data for neural net
+        source_train_X, source_train_Y, scaler = prepare_data_for_log_reg(all_X, all_Y, source_train_idxs,\
+                                                                          [], train = True)
+        source_test_X, source_test_Y, scaler = prepare_data_for_log_reg(all_X, all_Y, source_test_idxs,\
+                                                                        [], scaler = scaler)
+        target_train_X, target_train_Y, scaler = prepare_data_for_log_reg(all_X, all_Y, target_train_idxs,\
+                                                                          [], scaler = scaler)
+        target_test_X, target_test_Y, scaler = prepare_data_for_log_reg(all_X, all_Y, target_test_idxs,\
+                                                                        [], scaler = scaler)
+
+        n_features, n_outputs = source_train_X.shape[1], source_train_Y.shape[1]
+
+        #define and compile model
+        input_shape = (n_features,)
+        dann_model = DANN(input_shape, n_outputs, fe_layers = 1, dp_layers = 1, activation = 'tanh')
+        dann_model.compile(loss='categorical_crossentropy')
+
+        #train on source labels
+        print('Training on Source Labels')
+        dann_model.train_label_pred(source_train_X, source_train_Y, epochs=epochs, batch_size=batch_size, verbose=0)
+
+        #score on source data
+        source_train_scores[split_count,:] = get_scores(source_train_X, source_train_Y, dann_model.predict_label, score_list)
+        source_test_scores[split_count,:] = get_scores(source_test_X, source_test_Y, dann_model.predict_label, score_list)
+        #score on target data (naive transfer test)
+        naive_target_train_scores[split_count,:] = get_scores(target_train_X, target_train_Y, dann_model.predict_label, score_list)
+        naive_target_test_scores[split_count,:] = get_scores(target_test_X, target_test_Y, dann_model.predict_label, score_list)
+
+        #train same model with domain labels of target
+        print('Adapting to target Domain')
+        dann_model.train_domain_adapt(source_train_X, source_train_Y, target_train_X,\
+                                      epochs = epochs*3, batch_size = batch_size, verbose = 0)
+
+        #score on source data
+        adapt_source_test_scores[split_count,:] = get_scores(source_test_X, source_test_Y, dann_model.predict_label,\
+                                                             score_list)
+        #score on target data
+        adapt_target_train_scores[split_count,:]  = get_scores(target_train_X, target_train_Y, dann_model.predict_label,\
+                                                             score_list)
+        adapt_target_test_scores[split_count,:]  = get_scores(target_test_X, target_test_Y, dann_model.predict_label,\
+                                                             score_list)
+
+        # for comparison, use all available labels 
+        # define and compile model
+        input_shape = (n_features,)
+        dann_model = DANN(input_shape, n_outputs, fe_layers = 1, dp_layers = 1, activation = 'tanh')
+        dann_model.compile(loss='categorical_crossentropy')
+        print('Training with all labels revealed')
+        dann_model.train_domain_and_labels(source_train_X, source_train_X, target_train_X, target_train_Y,\
+                                           epochs=epochs*2, batch_size=batch_size, verbose=0)
+
+        revealed_source_train_scores[split_count,:] = get_scores(source_train_X, source_train_Y, dann_model.predict_label,\
+                                                             score_list)
+        revealed_source_test_scores[split_count,:] = get_scores(source_test_X, source_test_Y, dann_model.predict_label,\
+                                                             score_list)
+        revealed_target_train_scores[split_count,:] = get_scores(target_train_X, target_train_Y, dann_model.predict_label,\
+                                                             score_list)
+        revealed_target_test_scores[split_count,:] = get_scores(target_test_X, target_test_Y, dann_model.predict_label,\
+                                                             score_list)
+
+    #score arrays in dataframes
+    results_df = []
+
+    results_df = results_to_df(results_df, n_splits, score_list,\
+                               source_train_scores, 'Source_Train')
+    results_df = results_to_df(results_df, n_splits, score_list,\
+                               source_test_scores, 'Source_Test')
+
+    results_df = results_to_df(results_df, n_splits, score_list,\
+                               naive_target_train_scores, 'Naive_Target_Train')
+    results_df = results_to_df(results_df, n_splits, score_list,\
+                               naive_target_test_scores, 'Naive_Target_Test')
+
+    results_df = results_to_df(results_df, n_splits, score_list,\
+                               adapt_source_test_scores, 'Adapt_Source_Test')
+    results_df = results_to_df(results_df, n_splits, score_list,\
+                               adapt_target_train_scores, 'Adapt_Target_Train')
+    results_df = results_to_df(results_df, n_splits, score_list,\
+                               adapt_target_test_scores, 'Adapt_Target_Test')
+
+    results_df = results_to_df(results_df, n_splits, score_list,\
+                               revealed_source_train_scores, 'Revealed_Source_Train')
+    results_df = results_to_df(results_df, n_splits, score_list,\
+                               revealed_source_test_scores, 'Revealed_Source_Test')
+    results_df = results_to_df(results_df, n_splits, score_list,\
+                               revealed_target_train_scores, 'Revealed_Target_Train')
+    results_df = results_to_df(results_df, n_splits, score_list,\
+                               revealed_source_test_scores, 'Revealed_Target_Test')
+    results_df = pd.concat(results_df, axis = 0)
+
+    return results_df
 
 def within_subject_rnn_performance(X, Y, block_labels, series_labels, exclude, score_list = ['f1'],n_shuffled_sets = 10,\
                                    verbose = 0, epochs = 40, batch_size = 2, mv = None):
