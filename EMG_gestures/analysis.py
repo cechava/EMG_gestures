@@ -45,30 +45,27 @@ from tensorflow.keras.utils import to_categorical
 from EMG_gestures.utils import *
 from EMG_gestures.models import DANN
 
-__all__ = ['within_subject_log_reg_performance','get_trained_model','evaluate_trained_log_reg','log_reg_xsubject_test',\
+__all__ = ['within_subject_nn_performance','get_trained_model','evaluate_trained_log_reg','log_reg_xsubject_test',\
 'log_reg_xsubject_joint_data_train_frac_subjects',\
 'log_reg_xsubject_transform_module_train_all_subjects',\
 'log_reg_xsubject_transform_module_train_frac_subjects','log_reg_xsubject_transform_module_train_all_subjects',\
 'DANN_test',\
 'within_subject_rnn_performance','evaluate_trained_rnn','get_trained_rnn_model','rnn_xsubject_test']
 
-# ~~~~~~~~ LOGISTIC REGRESSION FUNCTIONS ~~~~~~~~
+# ~~~~~~~~ NON-TEMPORAL NEURAL NET FUNCTIONS ~~~~~~~~
+def within_subject_nn_performance(X, Y, series_labels, fe_layers = 0, exclude = [0,7],\
+                                  score_list = ['f1'], epochs = 40, batch_size = 2, verbose = 0, mv = None):
 
-
-
-
-def within_subject_log_reg_performance(X, Y, series_labels, exclude, score_list = ['f1'], verbose = 0, epochs = 40, batch_size = 2, mv = None):
-    """
-    Train and test performance of a logisitc regression model within the same subject
-    """
-    
-    #initialize object for k-fold cross-validation
     n_splits = np.unique(series_labels).size
     kf = KFold(n_splits=n_splits,shuffle = True)
     #initialize empty arrays
     n_scores = len(score_list)
     train_scores = np.empty((n_splits,n_scores))
     test_scores = np.empty((n_splits,n_scores))
+    #retrieve some values from input
+    nclass = (np.unique(Y).size)-np.sum(np.isin(np.unique(Y),exclude))
+    nsamples, nfeat = X.shape
+    prob_class = np.empty((nsamples,nclass))
 
     for split_count, (series_train, series_test) in enumerate(kf.split(np.unique(series_labels))):
         print('Split Count: %i'% (split_count+1))
@@ -76,22 +73,25 @@ def within_subject_log_reg_performance(X, Y, series_labels, exclude, score_list 
         train_idxs = np.where(series_labels==series_train)[0]
         test_idxs = np.where(series_labels==series_test)[0]
         #get training data cubes
-        X_train_cube, Y_train_cube, scaler = prepare_data_for_log_reg(X,Y, train_idxs, exclude, train = True)
+        X_train, Y_train, scaler = prepare_data_for_TF(X,Y, train_idxs, exclude, train = True)
 
-        n_features, n_outputs = X_train_cube.shape[1], Y_train_cube.shape[1]
+        n_features, n_outputs = X_train.shape[1], Y_train.shape[1]
 
         #setting timestep dimension to None 
-        model = get_log_reg_model((n_features,),n_outputs)
+        model = get_vanilla_nn_model((n_features,),n_outputs, fe_layers = fe_layers)
         model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
         #model.summary
 
         print('Training Model')
         # fit network
-        history = model.fit(X_train_cube, Y_train_cube, epochs=epochs, batch_size=batch_size, verbose=verbose)
+        history = model.fit(X_train, Y_train, epochs=epochs, batch_size=batch_size, verbose=verbose)
 
         # # evaluate trained network
         print('Evaluate Model')
-        
+
+        #get prediction probabiliity on test set samples
+        X_test, Y_test , scaler = prepare_data_for_TF(X,Y, test_idxs, [], train = False, scaler = scaler) 
+        prob_class[test_idxs,:] = model.predict(X_test) 
 
         if mv:
             #get score for training data
@@ -104,14 +104,15 @@ def within_subject_log_reg_performance(X, Y, series_labels, exclude, score_list 
         else:
 
             #get score for training data
-            train_scores[split_count,:] = get_scores(X_train_cube, Y_train_cube, model, score_list)
+            train_scores[split_count,:] = get_scores(X_train, Y_train, model, score_list)
 
             #get score for testing data
-            X_test_cube, Y_test_cube, scaler = prepare_data_for_log_reg(X,Y, test_idxs, exclude, train = False, scaler = scaler)
-            test_scores[split_count,:] = get_scores(X_test_cube, Y_test_cube, model, score_list)
+            X_test, Y_test , scaler = prepare_data_for_TF(X,Y, test_idxs, exclude, train = False, scaler = scaler)
+            test_scores[split_count,:] = get_scores(X_test, Y_test, model, score_list)
+            
+    return train_scores, test_scores, prob_class
 
 
-    return train_scores, test_scores
 
 
 def get_trained_model(X, Y, train_idxs, exclude = [], model_dict = {},score_list = ['f1'], verbose = 0, epochs = 40, batch_size = 2,\
@@ -127,13 +128,13 @@ def get_trained_model(X, Y, train_idxs, exclude = [], model_dict = {},score_list
     train_idxs = np.intersect1d(train_idxs,in_samples)
 
     #get training data cubes
-    X_train_cube, Y_train_cube, scaler = prepare_data_for_log_reg(X,Y, train_idxs, exclude, train = True)
+    X_train_cube, Y_train_cube, scaler = prepare_data_for_TF(X,Y, train_idxs, exclude, train = True)
 
     #testfor equal number of samples
     assert X_train_cube.shape[0] == Y_train_cube.shape[0]
     n_features, n_outputs = X_train_cube.shape[1], Y_train_cube.shape[1]
     #setting timestep dimension to None 
-    model = get_log_reg_model((n_features,),n_outputs, n_dense_pre=model_dict['n_dense_pre'], activation=model_dict['activation'])
+    model = get_vanilla_nn_model((n_features,),n_outputs, n_dense_pre=model_dict['n_dense_pre'], activation=model_dict['activation'])
     model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
     #model.summary
 
@@ -165,7 +166,7 @@ def evaluate_trained_log_reg(X, Y, test_idxs, exclude, trained_model, score_list
     else:
 
         # get testing data cubes
-        X_test_cube, Y_test_cube, scaler = prepare_data_for_log_reg(X,Y, test_idxs, exclude, train = False, scaler = scaler)
+        X_test_cube, Y_test_cube, scaler = prepare_data_for_TF(X,Y, test_idxs, exclude, train = False, scaler = scaler)
         #get score for testing data
         test_scores = get_scores(X_test_cube, Y_test_cube, trained_model, score_list)
     return test_scores
@@ -400,7 +401,7 @@ def log_reg_xsubject_transform_module_train_frac_subjects(feature_matrix, target
         test_idxs = np.where(np.isin(sub_labels,test_subs, invert = False))[0]
         
         #get training data cubes
-        X_train_cube, Y_train_cube, scaler = prepare_data_for_log_reg(feature_matrix, target_labels, train_idxs, exclude, train = True)
+        X_train_cube, Y_train_cube, scaler = prepare_data_for_TF(feature_matrix, target_labels, train_idxs, exclude, train = True)
         sub_labels_train = sub_labels[np.intersect1d(train_idxs,in_samples)]
 
 
@@ -409,7 +410,7 @@ def log_reg_xsubject_transform_module_train_frac_subjects(feature_matrix, target
         n_features, n_outputs = X_train_cube.shape[1], Y_train_cube.shape[1]
 
         # get testing data cubes
-        X_test_cube, Y_test_cube, scaler = prepare_data_for_log_reg(feature_matrix, target_labels, test_idxs, exclude, train = False, scaler = scaler)
+        X_test_cube, Y_test_cube, scaler = prepare_data_for_TF(feature_matrix, target_labels, test_idxs, exclude, train = False, scaler = scaler)
         
         sub_labels_test = sub_labels[np.intersect1d(test_idxs,in_samples)]
         series_labels_test = series_labels[np.intersect1d(test_idxs,in_samples)]
@@ -424,7 +425,7 @@ def log_reg_xsubject_transform_module_train_frac_subjects(feature_matrix, target
         # Define model architecture
 
         #setting timestep dimension to None 
-        model = get_log_reg_model((n_features,),n_outputs, n_dense_pre=model_dict['n_dense_pre'], activation=model_dict['activation'])
+        model = get_vanilla_nn_model((n_features,),n_outputs, n_dense_pre=model_dict['n_dense_pre'], activation=model_dict['activation'])
         model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
         #model.summary
         # # Get transform module template
@@ -567,7 +568,7 @@ def log_reg_xsubject_transform_module_train_all_subjects(feature_matrix, target_
 
 
     #get training data cubes
-    X_train_cube, Y_train_cube, scaler = prepare_data_for_log_reg(feature_matrix, target_labels, train_idxs, exclude, train = True)
+    X_train_cube, Y_train_cube, scaler = prepare_data_for_TF(feature_matrix, target_labels, train_idxs, exclude, train = True)
     in_samples = np.where(np.isin(target_labels,exclude, invert = True))[0]
     sub_labels_train = sub_labels[np.intersect1d(train_idxs,in_samples)]
 
@@ -577,7 +578,7 @@ def log_reg_xsubject_transform_module_train_all_subjects(feature_matrix, target_
 
     if test_idxs.size>0:
         #get testing data cubes
-        X_test_cube, Y_test_cube, scaler = prepare_data_for_log_reg(feature_matrix, target_labels, test_idxs, exclude, train = False, scaler = scaler)
+        X_test_cube, Y_test_cube, scaler = prepare_data_for_TF(feature_matrix, target_labels, test_idxs, exclude, train = False, scaler = scaler)
         in_samples = np.where(np.isin(target_labels,exclude, invert = True))[0]
         sub_labels_test = sub_labels[np.intersect1d(test_idxs,in_samples)]
 
@@ -593,7 +594,7 @@ def log_reg_xsubject_transform_module_train_all_subjects(feature_matrix, target_
     # Define model architecture
 
     #setting timestep dimension to None 
-    model = get_log_reg_model((n_features,),n_outputs, n_dense_pre=model_dict['n_dense_pre'], activation=model_dict['activation'])
+    model = get_vanilla_nn_model((n_features,),n_outputs, n_dense_pre=model_dict['n_dense_pre'], activation=model_dict['activation'])
     model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
     #model.summary
     # # Get transform module template
@@ -717,13 +718,13 @@ def DANN_test(source_X, source_Y, target_X, target_Y, score_list, n_splits, epoc
         target_test_idxs = np.intersect1d(test_idxs,np.where(dummy_Y>=2)[0])
 
         #prepare data for neural net
-        source_train_X, source_train_Y, scaler = prepare_data_for_log_reg(all_X, all_Y, source_train_idxs,\
+        source_train_X, source_train_Y, scaler = prepare_data_for_TF(all_X, all_Y, source_train_idxs,\
                                                                           [], train = True)
-        source_test_X, source_test_Y, scaler = prepare_data_for_log_reg(all_X, all_Y, source_test_idxs,\
+        source_test_X, source_test_Y, scaler = prepare_data_for_TF(all_X, all_Y, source_test_idxs,\
                                                                         [], scaler = scaler)
-        target_train_X, target_train_Y, scaler = prepare_data_for_log_reg(all_X, all_Y, target_train_idxs,\
+        target_train_X, target_train_Y, scaler = prepare_data_for_TF(all_X, all_Y, target_train_idxs,\
                                                                           [], scaler = scaler)
-        target_test_X, target_test_Y, scaler = prepare_data_for_log_reg(all_X, all_Y, target_test_idxs,\
+        target_test_X, target_test_Y, scaler = prepare_data_for_TF(all_X, all_Y, target_test_idxs,\
                                                                         [], scaler = scaler)
 
         n_features, n_outputs = source_train_X.shape[1], source_train_Y.shape[1]

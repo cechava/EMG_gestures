@@ -47,11 +47,11 @@ __all__ = ['get_gesture_times','get_steady_samp_rate_data','butter_bandpass_filt
 'get_data_cube','results_to_df',\
 'make_meshgrid','plot_contours',\
 'plot_sensor_values','plot_signal_pspec','visualize_time_series_prob','dim_reduction_visualization',\
-'plot_train_loss','plot_training_history',\
+'plot_train_loss','plot_training_history',  \
 'preds_to_scores','get_scores',\
 'shift_array','get_mv_preds','apply_mv_and_get_scores',\
 'permute_class_blocks','permute_class_within_sub',\
-'get_log_reg_model','get_log_reg_f1','prepare_data_for_log_reg',\
+'get_vanilla_nn_model','get_transform_module_nn_model','prepare_data_for_TF',\
 'get_transform_module','tm_template_weights_to_model','model_weights_to_tm_template',\
 'get_rnn_model','prepare_data_for_RNN','get_train_cube']
 
@@ -832,7 +832,7 @@ def apply_mv_and_get_scores(X, Y, subset_idxs, exclude,\
     else:
         if subset_idxs.size >0:
             # standardize and format original data
-            X, Y, scaler = prepare_data_for_log_reg(X,Y, subset_idxs, [], train = False, scaler = scaler)
+            X, Y, scaler = prepare_data_for_TF(X,Y, subset_idxs, [], train = False, scaler = scaler)
         #get majority voting prediction
         y_pred = get_mv_preds(X, model, n_votes= n_votes)+1
         # get grount-truth labels
@@ -901,81 +901,118 @@ def permute_class_within_sub(target_labels, block_labels, sub_labels, exclude):
 
 
 
-# ~~~~~~~~ LOGISTIC REGRESSION FUNCTIONS ~~~~~~~~
+# ~~~~~~~~ NON-TEMPORAL NN REGRESSION FUNCTIONS ~~~~~~~~
 
-def get_log_reg_model(input_shape, n_outputs, n_dense_pre = 0, drop_prob = 0.5, activation = 'tanh'):
+def get_vanilla_nn_model(input_shape, n_outputs, fe_layers = 0, drop_prob = 0.5, fe_activation = 'tanh'):
     """
-    Create 
+    Create neural net with fully connected layers
+    2 stages: 
+    Feature extractor (variable number of layers)
+    Label Prediction Head (Single fotmax layer)
     
     Args:
         input_shape
         n_outputs: number of output classes
-        mask_value: value indicating which timepoints to mask out
             
     Returns:
         model
     """
     
-    #define model architecture
-    X_input = Input(shape = input_shape)
-    X = X_input
-    for n in range(n_dense_pre):
-        X = Dense(input_shape[0],activation = activation)(X)
+    #define feature extractor model
+    fe_input = Input(shape = input_shape)
+    X = fe_input
+    for n in range(fe_layers):
+        X = Dense(input_shape[0],activation = fe_activation)(X)
         X = Dropout(drop_prob)(X)
-    X = Dense(n_outputs,activation = 'softmax')(X)
-    model = Model(inputs = X_input, outputs = X)
-    return model
+    fe_output = X   
+    feat_extract = Model(inputs = fe_input, outputs = fe_output, name = 'feature_extractor')
 
-def get_log_reg_f1(X, Y, model, average = 'weighted', mask_value = -100):
+    #label-predicting head
+    lp_head_input = Input(shape = input_shape)
+    lp_head_output = Dense(n_outputs,activation = 'softmax', name = 'label')(lp_head_input)
+    label_pred = Model(inputs = lp_head_input, outputs = lp_head_output, name = 'label_predictor')
+
+    lp_input = Input(shape = input_shape)
+    X = feat_extract(lp_input)
+    lp_output = label_pred(X)
+    predict_label = Model(inputs = lp_input, outputs = lp_output, name = 'vanilla_NN')
+    
+    return predict_label
+
+def get_transform_module_nn_model(input_shape, n_outputs, drop_prob = 0.5, \
+                            fe_layers = 0, fe_activation = 'tanh',\
+                           tm_layers = 0, tm_activation = 'tanh'):
     """
-    Get f1 score for an RNN model using masked timepoint data
-
+    Create neural net with fully connected layers
+    3 stages: 
+    Transform module (variable number of layers - domain-specific)
+    Feature extractor (variable number of layers)
+    Label Prediction Head (single fotmax layer)
+    
     Args:
-        X: 3D numpy array with shape [samples, timepoints, features]
-        Y: 3D numpy array with shape [samples, timepoints, classes]. one-hot coding of classes
-        model: RNN model object
-        average: string argument for f1_score function. Usually 'macro' or 'weighted'
-        mask_value: value indicating which timepoints to mask out
-
+        input_shape
+        n_outputs: number of output classes
+            
     Returns:
-        f1: f1 score
+        model
     """
-    # Mask out indices based on mask value
-    nonmasked_idxs = np.where(Y[:,0].flatten()!=mask_value)[0]
-    # Get target labels for non-masked timepoints
-    y_true = np.argmax(Y,1).flatten()[nonmasked_idxs]
-    # Get model predictions for non-masked timepoints
-    preds = model.predict(X)
-    y_pred = np.argmax(preds,1).flatten()[nonmasked_idxs]
-    # Get F1 score
-    f1 = f1_score(y_true,y_pred,average = average)
+    
+    #define transform module
+    tm_input = Input(shape = input_shape)
+    X = tm_input
+    for n in range(tm_layers):
+        X = Dense(input_shape[0],activation = tm_activation)(X)
+        X = Dropout(drop_prob)(X)
+    tm_output = X   
+    transform_module = Model(inputs = tm_input, outputs = tm_output, name = 'transform_module')
+    
+    #define feature extractor model
+    fe_input = Input(shape = input_shape)
+    X = fe_input
+    for n in range(fe_layers):
+        X = Dense(input_shape[0],activation = fe_activation)(X)
+        X = Dropout(drop_prob)(X)
+    fe_output = X   
+    feat_extract = Model(inputs = fe_input, outputs = fe_output, name = 'feature_extractor')
 
-    return f1
+    #label-predicting head
+    lp_head_input = Input(shape = input_shape)
+    lp_head_output = Dense(n_outputs,activation = 'softmax', name = 'label')(lp_head_input)
+    label_pred = Model(inputs = lp_head_input, outputs = lp_head_output, name = 'label_predictor')
 
-def prepare_data_for_log_reg(X,Y, select_idxs, exclude_labels, train = False,scaler = None):
+    lp_input = Input(shape = input_shape)
+    X = transform_module(lp_input)
+    X = feat_extract(X)
+    lp_output = label_pred(X)
+    predict_label = Model(inputs = lp_input, outputs = lp_output, name = 'tranform_module_NN')
+    
+    return predict_label
+
+
+
+def prepare_data_for_TF(X,Y, select_idxs, exclude_labels, train = False,scaler = None):
 
     """
     function to prepare data in format expected by tensorflow functions
     """
 
-    X_cube =  X[select_idxs,:]
-    Y_cube = Y[select_idxs]
+    X_data =  X[select_idxs,:]
+    Y_data = Y[select_idxs]
 
     if train:
         scaler = StandardScaler()
-        scaler = scaler.fit(X_cube)
-        X_cube = scaler.transform(X_cube)
+        scaler = scaler.fit(X_data)
+        X_data = scaler.transform(X_data)
     else:
-        X_cube = scaler.transform(X_cube)
+        X_data = scaler.transform(X_data)
 
-    include_idxs = np.where(np.isin(Y_cube,exclude_labels, invert = True))[0]
+    include_idxs = np.where(np.isin(Y_data,exclude_labels, invert = True))[0]
 
-    X_cube = X_cube[include_idxs,:]
-    Y_cube = Y_cube[include_idxs]
-    Y_cube = to_categorical(Y_cube-np.min(Y_cube))
+    X_data = X_data[include_idxs,:]
+    Y_data = Y_data[include_idxs]
+    Y_data = to_categorical(Y_data-np.min(Y_data))
 
-    return X_cube, Y_cube, scaler
-
+    return X_data, Y_data, scaler
 
 
 
