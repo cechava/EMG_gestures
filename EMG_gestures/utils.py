@@ -44,7 +44,7 @@ from tensorflow.keras.utils import to_categorical
 
 __all__ = ['get_gesture_times','get_steady_samp_rate_data','butter_bandpass_filter','get_window_features',\
 'window_and_get_features','parse_data_blocks','get_file_data_for_classification','get_subject_data_for_classification',\
-'get_data_cube',\
+'get_data_cube','results_to_df',\
 'make_meshgrid','plot_contours',\
 'plot_sensor_values','plot_signal_pspec','visualize_time_series_prob','dim_reduction_visualization',\
 'plot_train_loss','plot_training_history',\
