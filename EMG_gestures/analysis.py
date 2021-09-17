@@ -53,8 +53,16 @@ __all__ = ['within_subject_nn_performance','get_trained_model','evaluate_trained
 'within_subject_rnn_performance','evaluate_trained_rnn','get_trained_rnn_model','rnn_xsubject_test']
 
 # ~~~~~~~~ NON-TEMPORAL NEURAL NET FUNCTIONS ~~~~~~~~
-def within_subject_nn_performance(X, Y, series_labels, fe_layers = 0, exclude = [0,7],\
-                                  score_list = ['f1'], epochs = 40, batch_size = 2, verbose = 0, mv = None):
+def within_subject_nn_performance(X, Y, series_labels, model_dict, exclude = [0,7],\
+                                  score_list = ['f1'], epochs = 40, batch_size = 2, verbose = 0,\
+                                  prob_output = False, mv = None):
+
+    #default values
+    if 'fe_layers' not in model_dict.keys():
+        model_dict['fe_layers'] = 0
+    if 'fe_activation' not in model_dict.keys():
+        model_dict['fe_activation'] = 'tanh'
+
 
     n_splits = np.unique(series_labels).size
     kf = KFold(n_splits=n_splits,shuffle = True)
@@ -78,7 +86,8 @@ def within_subject_nn_performance(X, Y, series_labels, fe_layers = 0, exclude = 
         n_features, n_outputs = X_train.shape[1], Y_train.shape[1]
 
         #setting timestep dimension to None 
-        model = get_vanilla_nn_model((n_features,),n_outputs, fe_layers = fe_layers)
+        model = get_vanilla_nn_model((n_features,),n_outputs, fe_layers = model_dict['fe_layers'],\
+            fe_activation = model_dict['fe_activation'])
         model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
         #model.summary
 
@@ -89,9 +98,10 @@ def within_subject_nn_performance(X, Y, series_labels, fe_layers = 0, exclude = 
         # # evaluate trained network
         print('Evaluate Model')
 
-        #get prediction probabiliity on test set samples
-        X_test, Y_test , scaler = prepare_data_for_TF(X,Y, test_idxs, [], train = False, scaler = scaler) 
-        prob_class[test_idxs,:] = model.predict(X_test) 
+        if prob_output:
+            #get prediction probabiliity on test set samples
+            X_test, Y_test , scaler = prepare_data_for_TF(X,Y, test_idxs, [], train = False, scaler = scaler) 
+            prob_class[test_idxs,:] = model.predict(X_test) 
 
         if mv:
             #get score for training data
