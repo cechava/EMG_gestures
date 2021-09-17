@@ -39,6 +39,7 @@ from tensorflow import keras
 from tensorflow.keras.metrics import Precision, Recall
 from tensorflow.keras.models import Sequential, Model, load_model, Sequential, save_model
 from tensorflow. keras.layers import Dense, Activation, Dropout, Input,  TimeDistributed, GRU, Masking, LSTM
+from keras.callbacks import EarlyStopping
 
 from tensorflow.keras.utils import to_categorical
 
@@ -54,7 +55,7 @@ __all__ = ['within_subject_nn_performance','get_trained_model','evaluate_trained
 
 # ~~~~~~~~ NON-TEMPORAL NEURAL NET FUNCTIONS ~~~~~~~~
 def within_subject_nn_performance(X, Y, series_labels, model_dict, exclude = [0,7],\
-                                  score_list = ['f1'], epochs = 40, batch_size = 2, verbose = 0,\
+                                  score_list = ['f1'], epochs = 1000, batch_size = 5, es_patience = 50, verbose = 0,\
                                   prob_output = False, mv = None):
 
     #default values
@@ -70,6 +71,10 @@ def within_subject_nn_performance(X, Y, series_labels, model_dict, exclude = [0,
     n_scores = len(score_list)
     train_scores = np.empty((n_splits,n_scores))
     test_scores = np.empty((n_splits,n_scores))
+    #training deets
+    train_info_dict = {'val_loss': np.empty((n_splits,)),\
+                       'train_loss': np.empty((n_splits,)),\
+                       'epochs_trained':np.empty((n_splits,))}
     #retrieve some values from input
     nclass = (np.unique(Y).size)-np.sum(np.isin(np.unique(Y),exclude))
     nsamples, nfeat = X.shape
@@ -80,10 +85,14 @@ def within_subject_nn_performance(X, Y, series_labels, model_dict, exclude = [0,
         #get train and test idxs
         train_idxs = np.where(series_labels==series_train)[0]
         test_idxs = np.where(series_labels==series_test)[0]
-        #get training data cubes
+        #get training and test data format
         X_train, Y_train, scaler = prepare_data_for_TF(X,Y, train_idxs, exclude, train = True)
+        X_test, Y_test , scaler = prepare_data_for_TF(X,Y, test_idxs, exclude, train = False, scaler = scaler)
 
         n_features, n_outputs = X_train.shape[1], Y_train.shape[1]
+
+        # patient early stopping
+        es = EarlyStopping(monitor='val_loss', mode='min', verbose=0, patience=es_patience)
 
         #setting timestep dimension to None 
         model = get_vanilla_nn_model((n_features,),n_outputs, fe_layers = model_dict['fe_layers'],\
@@ -93,7 +102,13 @@ def within_subject_nn_performance(X, Y, series_labels, model_dict, exclude = [0,
 
         print('Training Model')
         # fit network
-        history = model.fit(X_train, Y_train, epochs=epochs, batch_size=batch_size, verbose=verbose)
+        history = model.fit(X_train, Y_train,validation_data = (X_test, Y_test),\
+                            epochs=epochs, batch_size=batch_size, verbose=verbose, callbacks = [es])
+
+        #save training details to dict
+        train_info_dict['train_loss'][split_count] = history.history['loss'][-1]
+        train_info_dict['val_loss'][split_count] = history.history['val_loss'][-1]
+        train_info_dict['epochs_trained'][split_count] = len(history.history['val_loss'])
 
         # # evaluate trained network
         print('Evaluate Model')
@@ -120,7 +135,7 @@ def within_subject_nn_performance(X, Y, series_labels, model_dict, exclude = [0,
             X_test, Y_test , scaler = prepare_data_for_TF(X,Y, test_idxs, exclude, train = False, scaler = scaler)
             test_scores[split_count,:] = get_scores(X_test, Y_test, model, score_list)
             
-    return train_scores, test_scores, prob_class
+    return train_scores, test_scores, prob_class, train_info_dict
 
 
 
