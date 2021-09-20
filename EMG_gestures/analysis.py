@@ -60,7 +60,7 @@ def within_subject_nn_performance(X, Y, series_labels, model_dict, exclude = [0,
 
     #default values
     if 'fe_layers' not in model_dict.keys():
-        model_dict['fe_layers'] = 0
+        model_dict['fe_layers'] = 1
     if 'fe_activation' not in model_dict.keys():
         model_dict['fe_activation'] = 'tanh'
 
@@ -94,7 +94,7 @@ def within_subject_nn_performance(X, Y, series_labels, model_dict, exclude = [0,
         # patient early stopping
         es = EarlyStopping(monitor='val_loss', mode='min', verbose=0, patience=es_patience)
 
-        #setting timestep dimension to None 
+        #define model and compile
         model = get_vanilla_nn_model((n_features,),n_outputs, fe_layers = model_dict['fe_layers'],\
             fe_activation = model_dict['fe_activation'])
         model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
@@ -834,12 +834,9 @@ def DANN_test(source_X, source_Y, target_X, target_Y, score_list, n_splits, epoc
 
     return results_df
 
-def within_subject_rnn_performance(X, Y, block_labels, series_labels, exclude, score_list = ['f1'],n_shuffled_sets = 10,\
-                                   verbose = 0, epochs = 40, batch_size = 2, mv = None):
-    """
-    Train and test performance of a RNN model within the same subject
-    """
-
+def within_subject_rnn_performance(X, Y, block_labels, series_labels, model_dict, exclude = [0,7],\
+                                  score_list = ['f1'], n_shuffled_sets = 10,epochs = 1000,\
+                                  batch_size = 5, es_patience = 50, verbose = 0,  mv = None):
 
     #initialize object for k-fold cross-validation
     n_splits = np.unique(series_labels).size
@@ -848,6 +845,10 @@ def within_subject_rnn_performance(X, Y, block_labels, series_labels, exclude, s
     n_scores = len(score_list)
     train_scores = np.empty((n_splits,n_scores))
     test_scores = np.empty((n_splits,n_scores))
+    #training deets
+    train_info_dict = {'val_loss': np.empty((n_splits,)),\
+                       'train_loss': np.empty((n_splits,)),\
+                       'epochs_trained':np.empty((n_splits,))}
 
     for split_count, (series_train, series_test) in enumerate(kf.split(np.unique(series_labels))):
         print('Split Count: %i'% (split_count+1))
@@ -858,14 +859,31 @@ def within_subject_rnn_performance(X, Y, block_labels, series_labels, exclude, s
         X_train_cube, Y_train_cube, scaler = prepare_data_for_RNN(X, Y, train_idxs, exclude, train = True,\
                                                     block_labels = block_labels, nsets = n_shuffled_sets)
         n_features, n_outputs = X_train_cube.shape[2], Y_train_cube.shape[2]
+        #get testing data cube
+        X_test_cube, Y_test_cube, scaler = prepare_data_for_RNN(X, Y, test_idxs, exclude, train = False, scaler = scaler)
+
+
+        # patient early stopping
+        es = EarlyStopping(monitor='val_loss', mode='min', verbose=0, patience=es_patience)
 
         # #setting timestep dimension to None 
-        model = get_rnn_model((None,n_features,),n_outputs)
+        model = get_rnn_model((None,n_features,),n_outputs, fe_layers = model_dict['fe_layers'],\
+                              fe_activation = model_dict['fe_activation'],\
+                              fc_layers = model_dict['fe_layers'], fc_activation = model_dict['fc_activation'])
         model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
         #model.summary()
+
+
         print('Training Model')
         # fit network
-        history = model.fit(X_train_cube, Y_train_cube, epochs=epochs, batch_size=batch_size, verbose=verbose)
+        history = model.fit(X_train_cube, Y_train_cube, validation_data = (X_test_cube, Y_test_cube),\
+                            epochs=epochs, batch_size=batch_size, verbose=0 , callbacks = [es])
+
+
+        #save training details to dict
+        train_info_dict['train_loss'][split_count] = history.history['loss'][-1]
+        train_info_dict['val_loss'][split_count] = history.history['val_loss'][-1]
+        train_info_dict['epochs_trained'][split_count] = len(history.history['val_loss'])
 
         # # evaluate trained network
         print('Evaluate Model')
@@ -884,9 +902,9 @@ def within_subject_rnn_performance(X, Y, block_labels, series_labels, exclude, s
             train_scores[split_count,:] = get_scores(X_train_cube, Y_train_cube, model, score_list, rnn = True)
 
             #get score for testing data
-            X_test_cube, Y_test_cube, scaler = prepare_data_for_RNN(X, Y, test_idxs, exclude, train = False, scaler = scaler)
             test_scores[split_count,:] = get_scores(X_test_cube, Y_test_cube, model, score_list, rnn = True)
-    return train_scores, test_scores
+            
+    return train_scores, test_scores, prob_class, train_info_dict
 
 def evaluate_trained_rnn(X, Y, test_idxs, exclude, trained_model, score_list = ['f1'],scaler = None, mv = None):
     #exclude indicated labels

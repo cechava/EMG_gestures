@@ -1044,7 +1044,9 @@ def model_weights_to_tm_template(transform_module, model):
 
 # # ~~~~~~~~ RNN CLASSIFIER FUNCTIONS ~~~~~~~~
 
-def get_rnn_model(input_shape, n_outputs, n_grus = 24, n_dense_pre = 0, n_dense_post = 0, drop_prob = 0.5, activation = 'tanh', mask_value = -100):
+def get_rnn_model(input_shape, n_outputs, n_grus = 24, fe_layers = 0, fe_activation = 'tanh',\
+                  fc_layers = 0, fc_activation = 'tanh', drop_prob = 0.5, mask_value = -100):
+
     """
     Create simple RNN model
     
@@ -1060,13 +1062,16 @@ def get_rnn_model(input_shape, n_outputs, n_grus = 24, n_dense_pre = 0, n_dense_
     #define model architecture
     X_input = Input(shape = input_shape)
     X = Masking(mask_value=mask_value)(X_input)
-    for n in range(n_dense_pre):
-        X = TimeDistributed(Dense(input_shape[1],activation = activation))(X)
+    #feature extraction portion
+    for n in range(fe_layers):
+        X = TimeDistributed(Dense(input_shape[1],activation = fe_activation))(X)
         X = Dropout(drop_prob)(X)
+    # recursive network   
     X = GRU(n_grus, return_sequences= True, stateful = False)(X)
     X = Dropout(drop_prob)(X)
-    for n in range(n_dense_post):
-        X = TimeDistributed(Dense(n_grus,activation = activation))(X)
+    # feature combo portion
+    for n in range(fc_layers):
+        X = TimeDistributed(Dense(n_grus,activation = fc_activation))(X)
         X = Dropout(drop_prob)(X)
     X = TimeDistributed(Dense(n_outputs,activation = 'softmax'))(X)
     model = Model(inputs = X_input, outputs = X)
