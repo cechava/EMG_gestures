@@ -46,7 +46,7 @@ from tensorflow.keras.utils import to_categorical
 from EMG_gestures.utils import *
 from EMG_gestures.models import DANN
 
-__all__ = ['within_subject_nn_performance','get_trained_model','evaluate_trained_log_reg','log_reg_xsubject_test',\
+__all__ = ['within_subject_nn_performance','get_trained_model','evaluate_trained_nn','across_subject_nn_performance',\
 'log_reg_xsubject_joint_data_train_frac_subjects',\
 'log_reg_xsubject_transform_module_train_all_subjects',\
 'log_reg_xsubject_transform_module_train_frac_subjects','log_reg_xsubject_transform_module_train_all_subjects',\
@@ -138,14 +138,16 @@ def within_subject_nn_performance(X, Y, series_labels, model_dict, exclude = [0,
     return train_scores, test_scores, prob_class, train_info_dict
 
 
+def get_trained_model(X, Y, train_idxs, model_dict = {}, exclude = [], score_list = ['f1'], verbose = 0, epochs = 40, batch_size = 2,\
+                      es_patience = 5, validation_split = 0.25, mv = False):
 
 
-def get_trained_model(X, Y, train_idxs, exclude = [], model_dict = {},score_list = ['f1'], verbose = 0, epochs = 40, batch_size = 2,\
-                      validation_split = 0, mv = False):
+    #default values
+    if 'fe_layers' not in model_dict.keys():
+        model_dict['fe_layers'] = 1
+    if 'fe_activation' not in model_dict.keys():
+        model_dict['fe_activation'] = 'tanh'
 
-
-    if not model_dict:
-        model_dict = {'n_dense_pre':0, 'activation':''}
 
     #exclude indicated labels
     in_samples = np.where(np.isin(Y,exclude, invert = True))[0]
@@ -158,15 +160,18 @@ def get_trained_model(X, Y, train_idxs, exclude = [], model_dict = {},score_list
     #testfor equal number of samples
     assert X_train_cube.shape[0] == Y_train_cube.shape[0]
     n_features, n_outputs = X_train_cube.shape[1], Y_train_cube.shape[1]
-    #setting timestep dimension to None 
-    model = get_vanilla_nn_model((n_features,),n_outputs, n_dense_pre=model_dict['n_dense_pre'], activation=model_dict['activation'])
+    # patient early stopping
+    es = EarlyStopping(monitor='val_loss', mode='min', verbose=0, patience=es_patience)
+    #define and compile model
+    model = get_vanilla_nn_model((n_features,),n_outputs, fe_layers = model_dict['fe_layers'],\
+            fe_activation = model_dict['fe_activation'])
     model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
     #model.summary
 
     print('Training Model')
     # fit network
     history = model.fit(X_train_cube, Y_train_cube,validation_split = validation_split, \
-                        epochs=epochs, batch_size=batch_size, verbose=verbose)
+                        epochs=epochs, batch_size=batch_size, verbose=verbose, callbacks = [es])
     # # evaluate trained network
     print('Evaluate Model on Trained Data')
 
@@ -178,7 +183,7 @@ def get_trained_model(X, Y, train_idxs, exclude = [], model_dict = {},score_list
         train_scores = get_scores(X_train_cube, Y_train_cube, model, score_list)
     return train_scores, model, scaler, history
 
-def evaluate_trained_log_reg(X, Y, test_idxs, exclude, trained_model, score_list = ['f1'],scaler = None, mv = None):
+def evaluate_trained_nn(X, Y, test_idxs, exclude, trained_model, score_list = ['f1'],scaler = None, mv = None):
     #exclude indicated labels
     test_idxs_orig = test_idxs.copy()
     in_samples = np.where(np.isin(Y,exclude, invert = True))[0]
@@ -196,8 +201,8 @@ def evaluate_trained_log_reg(X, Y, test_idxs, exclude, trained_model, score_list
         test_scores = get_scores(X_test_cube, Y_test_cube, trained_model, score_list)
     return test_scores
 
-def log_reg_xsubject_test(data_folder, src_subject_id, nsubjects, nreps, lo_freq, hi_freq, win_size, step, exclude, score_list = ['f1'], \
-                          verbose = 0, epochs = 40, batch_size = 2, mv = False, permute = False):
+def across_subject_nn_performance(data_folder, src_subject_id, nsubjects, nreps, lo_freq, hi_freq, win_size, step, model_dict, exclude, score_list = ['f1'], \
+                          verbose = 0, epochs = 40, batch_size = 2, es_patience = 5, mv = False, permute = False):
     
     
     subject_folder = os.path.join(data_folder,'%02d'%(src_subject_id))
@@ -216,17 +221,27 @@ def log_reg_xsubject_test(data_folder, src_subject_id, nsubjects, nreps, lo_freq
     results_df = []#initialize empty array for dataframes
     n_scores = len(score_list)
     train_scores_all = np.empty((nreps,n_scores))
+    train_info_dict = {'val_loss': np.empty((nreps,)),\
+                    'train_loss': np.empty((nreps,)),\
+                    'epochs_trained':np.empty((nreps,))}
     for rep in range(nreps):
         if permute:
             #permute while ignoring excluded blocks
             target_labels_src = permute_class_within_sub(target_labels_src_orig, block_labels_src, np.ones((target_labels_src.size,)), exclude)
 
         print('Subject %d|Rep %d'%(src_subject_id, rep+1))
-        train_scores, trained_model, scaler, train_history = get_trained_model(feature_matrix_src, target_labels_src, train_idxs, exclude,\
-                                                                               score_list = score_list,\
+        train_scores, trained_model, scaler, train_history = get_trained_model(feature_matrix_src, target_labels_src, train_idxs, model_dict, \
+                                                                               exclude, score_list = score_list,\
                                                                         verbose = verbose, epochs = epochs, batch_size = batch_size,\
-                                                                        mv = mv)
+                                                                        es_patience = es_patience, mv = mv)
+        print('Epochs Trained: %d'%(len(train_history.history['val_loss'])))
         train_scores_all[rep,:] = train_scores
+
+        #save training details to dict
+        train_info_dict['train_loss'][rep] = train_history.history['loss'][-1]
+        train_info_dict['val_loss'][rep] = train_history.history['val_loss'][-1]
+        train_info_dict['epochs_trained'][rep] = len(train_history.history['val_loss'])
+        
         # test on all other subjects
         # initialize empty lists
         test_scores_all = np.empty((0,0))
@@ -244,7 +259,7 @@ def log_reg_xsubject_test(data_folder, src_subject_id, nsubjects, nreps, lo_freq
                                                                         win_size, step)
                 test_idxs = np.arange(target_labels_targ.size)
 
-                test_scores = evaluate_trained_log_reg(feature_matrix_targ, target_labels_targ, test_idxs, exclude, trained_model,\
+                test_scores = evaluate_trained_nn(feature_matrix_targ, target_labels_targ, test_idxs, exclude, trained_model,\
                                                        score_list, scaler, mv = mv)
                 #append to list
                 test_scores_all = np.vstack((test_scores_all, test_scores)) if test_scores_all.size else test_scores
@@ -253,7 +268,13 @@ def log_reg_xsubject_test(data_folder, src_subject_id, nsubjects, nreps, lo_freq
         #put testing results in dataframe
         data_dict = {'Type':['Test' for x in range(nsubjects-1)],\
                      'Rep':[rep+1 for x in range(nsubjects-1)],\
-                     'Test_Subject':targ_subject_list}
+                     'Test_Subject':targ_subject_list,\
+                     'Epochs':[epochs for x in range(nsubjects-1)],\
+                'Batch_Size':[batch_size for x in range(nsubjects-1)],\
+                'Train_Loss':[train_info_dict['train_loss'][rep] for x in range(nsubjects-1)],\
+                    'Val_Loss':[train_info_dict['val_loss'][rep] for x in range(nsubjects-1)],\
+                    'Epochs_Trained':[train_info_dict['epochs_trained'][rep] for x in range(nsubjects-1)],\
+                     }
         for sidx in range(n_scores):
             data_dict['%s_score'%(score_list[sidx])] = test_scores_all[:,sidx]
         results_df.append(pd.DataFrame(data_dict))
@@ -262,7 +283,13 @@ def log_reg_xsubject_test(data_folder, src_subject_id, nsubjects, nreps, lo_freq
     # #put training results in dataframe
     data_dict = {'Type':['Train' for x in range(nreps)],\
                  'Rep':[x+1 for x in range(nreps)],\
-                 'Test_Subject':[src_subject_id for x in range(nreps)]}
+                 'Test_Subject':[src_subject_id for x in range(nreps)],\
+                 'Epochs':[epochs for x in range(nreps)],\
+                'Batch_Size':[batch_size for x in range(nreps)],\
+                'Train_Loss':train_info_dict['train_loss'],\
+                    'Val_Loss':train_info_dict['val_loss'],\
+                    'Epochs_Trained':train_info_dict['epochs_trained'],\
+                 }
     for sidx in range(n_scores):
         data_dict['%s_score'%(score_list[sidx])] = train_scores_all[:,sidx]
     results_df.append(pd.DataFrame(data_dict))
@@ -271,8 +298,6 @@ def log_reg_xsubject_test(data_folder, src_subject_id, nsubjects, nreps, lo_freq
     results_df = pd.concat(results_df, axis = 0).reset_index(drop = True)
 
     return results_df
-
-    
 
 
 
