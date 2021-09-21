@@ -31,24 +31,24 @@ from sklearn.metrics import accuracy_score, f1_score,make_scorer, log_loss
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import make_pipeline
-from sklearn.manifold import TSNE
 from sklearn.model_selection import KFold
 
 
 from tensorflow import keras
+from keras.callbacks import EarlyStopping
 from tensorflow.keras.metrics import Precision, Recall
 from tensorflow.keras.models import Sequential, Model, load_model, Sequential, save_model
 from tensorflow. keras.layers import Dense, Activation, Dropout, Input,  TimeDistributed, GRU, Masking, LSTM
-from keras.callbacks import EarlyStopping
 
 from tensorflow.keras.utils import to_categorical
+
 
 from EMG_gestures.utils import *
 from EMG_gestures.models import DANN
 
 __all__ = ['within_subject_nn_performance','get_trained_model','evaluate_trained_nn','across_subject_nn_performance',\
 'log_reg_xsubject_joint_data_train_frac_subjects',\
-'log_reg_xsubject_transform_module_train_all_subjects',\
+'log_reg_xsubject_joint_data_train_all_subjects',\
 'log_reg_xsubject_transform_module_train_frac_subjects','log_reg_xsubject_transform_module_train_all_subjects',\
 'DANN_test',\
 'within_subject_rnn_performance','evaluate_trained_rnn','get_trained_rnn_model','rnn_xsubject_test']
@@ -859,9 +859,19 @@ def DANN_test(source_X, source_Y, target_X, target_Y, score_list, n_splits, epoc
 
     return results_df
 
+
 def within_subject_rnn_performance(X, Y, block_labels, series_labels, model_dict, exclude = [0,7],\
-                                  score_list = ['f1'], n_shuffled_sets = 10,epochs = 1000,\
-                                  batch_size = 5, es_patience = 50, verbose = 0,  mv = None):
+                                  score_list = ['f1'], n_shuffled_sets = 20,epochs = 1000,\
+                                  batch_size = 5, es_patience = 5, verbose = 0,  mv = None):
+    #default values
+    if 'fe_layers' not in model_dict.keys():
+        model_dict['fe_layers'] = 1
+    if 'fe_activation' not in model_dict.keys():
+        model_dict['fe_activation'] = 'tanh'
+    if 'fc_layers' not in model_dict.keys():
+        model_dict['fc_layers'] = 0
+    if 'fc_activation' not in model_dict.keys():
+        model_dict['fc_activation'] = 'tanh'
 
     #initialize object for k-fold cross-validation
     n_splits = np.unique(series_labels).size
@@ -898,11 +908,11 @@ def within_subject_rnn_performance(X, Y, block_labels, series_labels, model_dict
         model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
         #model.summary()
 
-
         print('Training Model')
         # fit network
         history = model.fit(X_train_cube, Y_train_cube, validation_data = (X_test_cube, Y_test_cube),\
                             epochs=epochs, batch_size=batch_size, verbose=0 , callbacks = [es])
+        print('Epochs Trained: %d'%(len(history.history['val_loss'])))
 
 
         #save training details to dict
@@ -929,7 +939,7 @@ def within_subject_rnn_performance(X, Y, block_labels, series_labels, model_dict
             #get score for testing data
             test_scores[split_count,:] = get_scores(X_test_cube, Y_test_cube, model, score_list, rnn = True)
             
-    return train_scores, test_scores, prob_class, train_info_dict
+    return train_scores, test_scores, train_info_dict
 
 def evaluate_trained_rnn(X, Y, test_idxs, exclude, trained_model, score_list = ['f1'],scaler = None, mv = None):
     #exclude indicated labels
