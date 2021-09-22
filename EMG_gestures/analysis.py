@@ -44,7 +44,7 @@ from tensorflow.keras.utils import to_categorical
 
 
 from EMG_gestures.utils import *
-from EMG_gestures.models import DANN
+from EMG_gestures.models import DANN, EarlyStopping_Custom
 
 __all__ = ['within_subject_nn_performance','get_trained_model','evaluate_trained_nn','across_subject_nn_performance',\
 'log_reg_xsubject_joint_data_train_frac_subjects',\
@@ -719,7 +719,6 @@ def log_reg_xsubject_transform_module_train_all_subjects(feature_matrix, target_
         keras.models.save_model(model, model_fn, save_format= 'h5')
     return results_df, scaler
 
-
 def DANN_test(source_X, source_Y, target_X, target_Y, score_list, n_splits, epochs, batch_size,\
               permute = False):
 
@@ -786,7 +785,9 @@ def DANN_test(source_X, source_Y, target_X, target_Y, score_list, n_splits, epoc
 
         #train on source labels
         print('Training on Source Labels')
-        dann_model.train_label_pred(source_train_X, source_train_Y, epochs=epochs, batch_size=batch_size, verbose=0)
+        es = EarlyStopping_Custom(mode='min', min_delta=.05, patience=5)
+        dann_model.train_label_pred(source_train_X, source_train_Y, validation_split = 0.25,\
+                                    epochs=epochs, batch_size=batch_size, verbose=0, callback = es)
 
         #score on source data
         source_train_scores[split_count,:] = get_scores(source_train_X, source_train_Y, dann_model.predict_label, score_list)
@@ -797,8 +798,9 @@ def DANN_test(source_X, source_Y, target_X, target_Y, score_list, n_splits, epoc
 
         #train same model with domain labels of target
         print('Adapting to target Domain')
-        dann_model.train_domain_adapt(source_train_X, source_train_Y, target_train_X,\
-                                      epochs = epochs*3, batch_size = batch_size, verbose = 0)
+        es = EarlyStopping_Custom(mode='max', min_delta=.05, patience=50)
+        dann_model.train_domain_adapt(source_train_X, source_train_Y, target_train_X, validation_split = 0.25,\
+                                      epochs = epochs*3, batch_size = batch_size, verbose = 0, callback = es)
 
         #score on source data
         adapt_source_test_scores[split_count,:] = get_scores(source_test_X, source_test_Y, dann_model.predict_label,\
@@ -815,8 +817,10 @@ def DANN_test(source_X, source_Y, target_X, target_Y, score_list, n_splits, epoc
         dann_model = DANN(input_shape, n_outputs, fe_layers = 1, dp_layers = 1, activation = 'tanh')
         dann_model.compile(loss='categorical_crossentropy')
         print('Training with all labels revealed')
+        es = EarlyStopping_Custom(mode='min', min_delta=.05, patience=20)
         dann_model.train_domain_and_labels(source_train_X, source_train_X, target_train_X, target_train_Y,\
-                                           epochs=epochs*2, batch_size=batch_size, verbose=0)
+                                           validation_split = 0.25,
+                                           epochs=epochs*2, batch_size=batch_size, verbose=0, callback = es)
 
         revealed_source_train_scores[split_count,:] = get_scores(source_train_X, source_train_Y, dann_model.predict_label,\
                                                              score_list)
@@ -858,6 +862,7 @@ def DANN_test(source_X, source_Y, target_X, target_Y, score_list, n_splits, epoc
     results_df = pd.concat(results_df, axis = 0)
 
     return results_df
+
 
 
 def within_subject_rnn_performance(X, Y, block_labels, series_labels, model_dict, exclude = [0,7],\
