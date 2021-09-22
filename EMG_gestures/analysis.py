@@ -47,8 +47,7 @@ from EMG_gestures.utils import *
 from EMG_gestures.models import DANN
 
 __all__ = ['within_subject_nn_performance','get_trained_model','evaluate_trained_nn','across_subject_nn_performance',\
-'log_reg_xsubject_joint_data_train_frac_subjects',\
-'log_reg_xsubject_joint_data_train_all_subjects',\
+'nn_xsubject_joint_data_train_frac_subjects',' nn_xsubject_joint_data_train_all_subjects',\
 'log_reg_xsubject_transform_module_train_frac_subjects','log_reg_xsubject_transform_module_train_all_subjects',\
 'DANN_test',\
 'within_subject_rnn_performance','evaluate_trained_rnn','get_trained_rnn_model','rnn_xsubject_test']
@@ -301,12 +300,13 @@ def across_subject_nn_performance(data_folder, src_subject_id, nsubjects, nreps,
 
 
 
-def log_reg_xsubject_joint_data_train_frac_subjects(feature_matrix, target_labels, sub_labels, block_labels, exclude,\
-                                                    model_dict, score_list, n_splits = 4,\
-                                                    verbose = 0, epochs = 40, batch_size = 2, validation_split = 0.1, mv = False, permute = False):
+def nn_xsubject_joint_data_train_frac_subjects(feature_matrix, target_labels, sub_labels, block_labels, model_dict, exclude,\
+                                                    score_list, n_splits = 4,\
+                                                    verbose = 0, epochs = 1000, batch_size = 5, es_patience = 5,validation_split = 0.25,\
+                                                mv = False, permute = False):
     """
-    train and validate a logistic regression model using data from multiple subjects 
-    train and validate model performance by splitting subjects into a train and test set
+    train and validate a vanilla neural net model using data from multiple subjects 
+    train and validate model performance by splitting input subjects into a train and test set
     """
 
     #subjects in list. there are the units over which we will do train/test split
@@ -325,8 +325,10 @@ def log_reg_xsubject_joint_data_train_frac_subjects(feature_matrix, target_label
     train_scores_all = np.empty((n_splits,n_scores))
     test_scores_all = np.empty((n_splits,n_scores))
     train_history = dict()
-    train_history['loss'] = np.empty((0,0))
-    train_history['val_loss'] = np.empty((0,0))
+
+    train_info_dict = {'val_loss': np.empty((n_splits,)),\
+                    'train_loss': np.empty((n_splits,)),\
+                    'epochs_trained':np.empty((n_splits,))}
 
     for split_count, (subs_train_idxs, subs_test_idxs) in enumerate(kf.split(subs)):
         print('Split Count: %i'% (split_count+1))
@@ -338,47 +340,62 @@ def log_reg_xsubject_joint_data_train_frac_subjects(feature_matrix, target_label
         test_idxs = np.where(np.isin(sub_labels,test_subs, invert = False))[0]
 
         #get trained model
-        train_scores, trained_model, scaler, history = get_trained_model(feature_matrix, target_labels, train_idxs, exclude,\
-                                                                         model_dict, score_list,\
-                                                                         verbose = verbose, epochs = epochs, batch_size = batch_size,\
-                                                                         validation_split = validation_split,\
-                                                                         mv = mv)
+        train_scores, trained_model, scaler, history = get_trained_model(feature_matrix, target_labels, train_idxs, model_dict, exclude,\
+                                                                            score_list,\
+                                                                            verbose = verbose, epochs = epochs, batch_size = batch_size,\
+                                                                            es_patience = es_patience,\
+                                                                            validation_split = validation_split,\
+                                                                            mv = mv)
+        #save training details to dict
+        train_info_dict['train_loss'][split_count] = history.history['loss'][-1]
+        train_info_dict['val_loss'][split_count] = history.history['val_loss'][-1]
+        train_info_dict['epochs_trained'][split_count] = len(history.history['val_loss'])
+
         #Evaluating on held-out subjects
-        test_scores = evaluate_trained_log_reg(feature_matrix, target_labels, test_idxs, exclude, trained_model, score_list,scaler, mv = mv)
-    
+        test_scores = evaluate_trained_nn(feature_matrix, target_labels, test_idxs, exclude, trained_model, score_list,scaler, mv = mv)
+
         #put scores in array
         train_scores_all[split_count,:] = train_scores
         test_scores_all[split_count,:] = test_scores
 
-        #append history
-        train_history['loss'] = np.vstack((train_history['loss'],history.history['loss'])) if train_history['loss'].size else np.array(history.history['loss'])
-        if validation_split>0:
-            train_history['val_loss'] = np.vstack((train_history['val_loss'],history.history['val_loss'])) if train_history['val_loss'].size else np.array(history.history['val_loss']) 
-    
+
     #put in data frame
     results_df = []
     data_dict = {'Fold':np.arange(n_splits)+1,\
-                  'Type':['Train' for x in range(n_splits)]}
+                    'Type':['Train' for x in range(n_splits)],\
+                    'Epochs':[epochs for x in range(n_splits)],\
+                'Batch_Size':[batch_size for x in range(n_splits)],\
+                'Train_Loss':train_info_dict['train_loss'],\
+                    'Val_Loss':train_info_dict['val_loss'],\
+                    'Epochs_Trained':train_info_dict['epochs_trained'],\
+                }
     for sidx in range(n_scores):
         data_dict['%s_score'%(score_list[sidx])] = train_scores_all[:,sidx]
     results_df.append(pd.DataFrame(data_dict))
 
     data_dict = {'Fold':np.arange(n_splits)+1,\
-                 'Type':['Test' for x in range(n_splits)]}
+                    'Type':['Test' for x in range(n_splits)],\
+                    'Epochs':[epochs for x in range(n_splits)],\
+                'Batch_Size':[batch_size for x in range(n_splits)],\
+                'Train_Loss':train_info_dict['train_loss'],\
+                    'Val_Loss':train_info_dict['val_loss'],\
+                    'Epochs_Trained':train_info_dict['epochs_trained'],\
+                }
     for sidx in range(n_scores):
         data_dict['%s_score'%(score_list[sidx])] = test_scores_all[:,sidx]
     results_df.append(pd.DataFrame(data_dict))
 
     results_df = pd.concat(results_df,axis = 0)
 
-    return results_df, train_history
+    return results_df
 
-def log_reg_xsubject_joint_data_train_all_subjects(feature_matrix, target_labels, sub_labels, block_labels, exclude,\
-                                                    model_dict, score_list,
-                                                    verbose = 0, epochs = 40, batch_size = 2, validation_split = 0.1, mv = False, permute = False):
+
+def nn_xsubject_joint_data_train_all_subjects(feature_matrix, target_labels, sub_labels, block_labels, model_dict,exclude,\
+                                                     score_list, verbose = 0, epochs = 40, batch_size = 2, validation_split = 0.25,\
+                                              es_patience = 5, mv = False, permute = False):
     """
-    train and validate a logistic regression model using data from multiple subjects 
-    train on all subjects
+    train and validate a vanilla neural model using data from multiple subjects 
+    train on all input subjects
     """
 
     #subjects in list. there are the units over which we will do train/test split
@@ -396,21 +413,27 @@ def log_reg_xsubject_joint_data_train_all_subjects(feature_matrix, target_labels
     train_subs = subs
     train_idxs = np.where(np.isin(sub_labels,train_subs, invert = False))[0]
     #get trained model
-    train_scores, trained_model, scaler, history = get_trained_model(feature_matrix, target_labels, train_idxs, exclude,\
-                                                                        model_dict, score_list,\
+    train_scores, trained_model, scaler, history = get_trained_model(feature_matrix, target_labels, train_idxs, model_dict, exclude,\
+                                                                        score_list,\
                                                                         verbose = verbose, epochs = epochs, batch_size = batch_size,\
+                                                                        es_patience = es_patience,\
                                                                         validation_split = validation_split,\
                                                                         mv = mv)
 
 
     #put in data frame
-    data_dict = {'Type':'Train'}
+    data_dict = {'Type':'Train',\
+                  'Batch_Size':batch_size,\
+             'Train_Loss': history.history['loss'][-1],\
+                 'Val_Loss': history.history['loss'][-1],\
+                 'Epochs_Trained': len(history.history['loss']),\
+                 }
     for sidx in range(n_scores):
         data_dict['%s_score'%(score_list[sidx])] = train_scores[sidx]
     results_df = pd.DataFrame(data_dict, index = [0])
 
 
-    return results_df, history, trained_model, scaler
+    return results_df, trained_model, scaler
 
 
 def log_reg_xsubject_transform_module_train_frac_subjects(feature_matrix, target_labels, sub_labels, block_labels, series_labels, exclude,\
