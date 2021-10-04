@@ -1018,28 +1018,24 @@ def prepare_data_for_TF(X,Y, select_idxs, exclude_labels, train = False,scaler =
 
 # ~~~~~~~~ TRANSFORM MODULE FUNCTIONS ~~~~~~~~
 
-def get_transform_module(model,input_layer, n_main_layers):
+def get_transform_module(model):
     model1 = keras.models.clone_model(model)
-    X = input_layer
-    for layer in model1.layers[1:-n_main_layers]:
-        X = layer(X)
-    transform_module = Model(inputs = input_layer, outputs = X)
+    transform_module = model1.get_layer('transform_module')
 
     return transform_module
 
 def tm_template_weights_to_model(transform_module, model):
     for lidx, layer in enumerate(transform_module.layers):
         tm_weights = transform_module.get_layer(index = lidx).get_weights()
-        model.get_layer(index = lidx).set_weights(tm_weights)
+        model.get_layer('transform_module').get_layer(index = lidx).set_weights(tm_weights)
     return model
 
 def model_weights_to_tm_template(transform_module, model):  
     transform_module1 = keras.models.clone_model(transform_module)
     for lidx, layer in enumerate(transform_module1.layers):
-        m_weights = model.get_layer(index = lidx).get_weights()
+        m_weights = model.get_layer('transform_module').get_layer(index = lidx).get_weights()
         transform_module1.get_layer(index = lidx).set_weights(m_weights)
     return transform_module1
-
 
 
 # # ~~~~~~~~ RNN CLASSIFIER FUNCTIONS ~~~~~~~~
@@ -1108,7 +1104,7 @@ def prepare_data_for_RNN(X, Y, select_idxs, exclude, magic_value = -100, \
 
         #one-hot encoding of class labels
         keep_cols = np.arange(np.max(Y)+1).astype('int')
-        keep_cols[np.isin(keep_cols, exclude, invert = True)]
+        keep_cols = keep_cols[np.isin(keep_cols, exclude, invert = True)]
         Y_cube = to_categorical(Y)[:,keep_cols]
 
         X[exclude_idxs,:] = magic_value
@@ -1154,7 +1150,7 @@ def get_train_cube(X, Y, block_labels, exclude, nsets = 10, magic_value = -100):
         include_idxs = np.where(np.isin(Y_blocks_shuffled,exclude, invert = True))[0]
     #   #one-hot encoding of class labels
         keep_cols = np.arange(np.max(Y)+1).astype('int')
-        keep_cols[np.isin(keep_cols, exclude, invert = True)]
+        keep_cols = keep_cols[np.isin(keep_cols, exclude, invert = True)]
         Y_blocks_shuffled = to_categorical(Y_blocks_shuffled)[:,keep_cols]
         X_blocks_shuffled[exclude_idxs,:] = magic_value
         Y_blocks_shuffled[exclude_idxs,:] = magic_value

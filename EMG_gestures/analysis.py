@@ -48,9 +48,9 @@ from EMG_gestures.models import DANN, EarlyStopping_Custom
 
 __all__ = ['within_subject_nn_performance','get_trained_model','evaluate_trained_nn','across_subject_nn_performance',\
 'nn_xsubject_joint_data_train_frac_subjects',' nn_xsubject_joint_data_train_all_subjects',\
-'log_reg_xsubject_transform_module_train_frac_subjects','log_reg_xsubject_transform_module_train_all_subjects',\
+'nn_xsubject_transform_module_train_frac_subjects','nn_xsubject_transform_module_train_all_subjects',\
 'DANN_test',\
-'within_subject_rnn_performance','evaluate_trained_rnn','get_trained_rnn_model','rnn_xsubject_test']
+'within_subject_rnn_performance','evaluate_trained_rnn','get_trained_rnn_model','across_suject_rnn_performance']
 
 # ~~~~~~~~ NON-TEMPORAL NEURAL NET FUNCTIONS ~~~~~~~~
 def within_subject_nn_performance(X, Y, series_labels, model_dict, exclude = [0,7],\
@@ -436,13 +436,25 @@ def nn_xsubject_joint_data_train_all_subjects(feature_matrix, target_labels, sub
     return results_df, trained_model, scaler
 
 
-def log_reg_xsubject_transform_module_train_frac_subjects(feature_matrix, target_labels, sub_labels, block_labels, series_labels, exclude,\
-                                                         model_dict,score_list = ['f1'],n_train_splits = 4, n_val_splits = 2,\
-                                                         verbose = 0, epochs = 40, batch_size = 2, mv = None,permute = False):
+def nn_xsubject_transform_module_train_frac_subjects(feature_matrix, target_labels, sub_labels, block_labels, series_labels,\
+                                                     model_dict, exclude, score_list = ['f1'],n_train_splits = 4, n_val_splits = 2,\
+                                                     verbose = 0, epochs = 40, batch_size = 2, es_patience = 5,validation_split = 0.25,\
+                                                     mv = None, permute = False):
     """
-    train and validate a logistic regression model with a transform module for domain adaptation. 
+    train and validate a neural network model with a transform module for domain adaptation. 
     train and validate model performance by splitting subjects into a train and test set
     """
+
+
+    #default values
+    if 'fe_layers' not in model_dict.keys():
+        model_dict['fe_layers'] = 1
+    if 'fe_activation' not in model_dict.keys():
+        model_dict['fe_activation'] = 'tanh'
+    if 'tm_layers' not in model_dict.keys():
+        model_dict['tm_layers'] = 0
+    if 'tm_activation' not in model_dict.keys():
+        model_dict['tm_activation'] = ''
 
     if permute:
         #permute while ignoring excluded blocks
@@ -467,11 +479,6 @@ def log_reg_xsubject_transform_module_train_frac_subjects(feature_matrix, target
         train_idxs = np.where(np.isin(sub_labels,train_subs, invert = False))[0]
         test_idxs = np.where(np.isin(sub_labels,test_subs, invert = False))[0]
 
-        #get train and test indices
-        train_subs = subs[subs_train_idxs]
-        test_subs = subs[subs_test_idxs]
-        train_idxs = np.where(np.isin(sub_labels,train_subs, invert = False))[0]
-        test_idxs = np.where(np.isin(sub_labels,test_subs, invert = False))[0]
         
         #get training data cubes
         X_train_cube, Y_train_cube, scaler = prepare_data_for_TF(feature_matrix, target_labels, train_idxs, exclude, train = True)
@@ -493,17 +500,20 @@ def log_reg_xsubject_transform_module_train_frac_subjects(feature_matrix, target
         #initialize empty list
         n_scores = len(score_list)
         train_scores_all = np.empty((train_subs.size,n_scores))
+        train_info_dict = {'val_loss': np.empty((train_subs.size,)),\
+                    'train_loss': np.empty((train_subs.size,)),\
+                    'epochs_trained':np.empty((train_subs.size,))}
 
         # --- Training Stage ---
-        # Define model architecture
-
-        #setting timestep dimension to None 
-        model = get_vanilla_nn_model((n_features,),n_outputs, n_dense_pre=model_dict['n_dense_pre'], activation=model_dict['activation'])
+        # patient early stopping
+        es = EarlyStopping(monitor='val_loss', mode='min', verbose=0, patience=es_patience)
+        # Define model architecture(
+        model = get_transform_module_nn_model((n_features,),n_outputs, tm_layers = model_dict['tm_layers'], tm_activation = model_dict['tm_activation'],\
+                                            fe_layers = model_dict['fe_layers'], fe_activation = model_dict['fe_activation'])
         model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
         #model.summary
         # # Get transform module template
-        transform_module_template = get_transform_module(model, Input(shape = (None,n_features)),1)
-
+        transform_module_template = get_transform_module(model)
 
         # iterate thorugh subjects' data
         for sub_idx, train_sub in enumerate(train_subs_perm):
@@ -518,7 +528,12 @@ def log_reg_xsubject_transform_module_train_frac_subjects(feature_matrix, target
 
             print('Training Model')
             # fit network
-            history = model.fit(X_cube_sub, Y_cube_sub, epochs=epochs, batch_size=batch_size, verbose=verbose)
+            history = model.fit(X_cube_sub, Y_cube_sub, validation_split = validation_split,\
+                                epochs=epochs, batch_size=batch_size, verbose=verbose, callbacks = [es])
+            #save training details to dict
+            train_info_dict['train_loss'][sub_idx] = history.history['loss'][-1]
+            train_info_dict['val_loss'][sub_idx] = history.history['val_loss'][-1]
+            train_info_dict['epochs_trained'][sub_idx] = len(history.history['val_loss'])
 
             #copy weights to a transfer module template, save if wanted
             trained_transfer_module = model_weights_to_tm_template(transform_module_template, model)
@@ -536,8 +551,14 @@ def log_reg_xsubject_transform_module_train_frac_subjects(feature_matrix, target
 
         # #put results in dataframe
         data_dict = {'Subject':train_subs_perm+1,\
-                     'Fold':[split_count+1 for x in range(train_subs_perm.size)],\
-                     'Type':['Train' for x in range(train_subs_perm.size)]}
+                        'Fold':[split_count+1 for x in range(train_subs_perm.size)],\
+                        'Type':['Train' for x in range(train_subs_perm.size)],\
+                    'Epochs':[epochs for x in range(train_subs_perm.size)],\
+                        'Batch_Size':[batch_size for x in range(train_subs_perm.size)],\
+                        'Train_Loss':train_info_dict['train_loss'],\
+                        'Val_Loss':train_info_dict['val_loss'],\
+                        'Epochs_Trained':train_info_dict['epochs_trained'],\
+                        }
 
         for s_idx in range(n_scores):
             data_dict['%s_score'%(score_list[s_idx])] = train_scores_all[:,s_idx]
@@ -545,8 +566,8 @@ def log_reg_xsubject_transform_module_train_frac_subjects(feature_matrix, target
         results_df.append(pd.DataFrame(data_dict))
 
         # --- Validation Stage ---
-        #freeze top layers
-        for layer in model.layers[-1:]:
+        #freeze feature exraction layers
+        for layer in model.get_layer('feature_extractor').layers:
                 layer.trainable = False
 
         # iterate through test subjects
@@ -565,6 +586,10 @@ def log_reg_xsubject_transform_module_train_frac_subjects(feature_matrix, target
 
             val_train_scores = np.empty((n_val_splits,n_scores))
             val_test_scores = np.empty((n_val_splits,n_scores))
+            #training deets
+            val_train_info_dict = {'val_loss': np.empty((n_val_splits,)),\
+                            'train_loss': np.empty((n_val_splits,)),\
+                            'epochs_trained':np.empty((n_val_splits,))}
 
             #systematically use one fold of the data as a held-out test set
             for split_count_val, (series_train, series_test) in enumerate(kf.split(np.unique(test_series))):
@@ -573,7 +598,7 @@ def log_reg_xsubject_transform_module_train_frac_subjects(feature_matrix, target
                 series_train_idxs = np.where(test_series==series_train)[0]
                 X_train_cube_sub = X_cube_sub[series_train_idxs,:]
                 Y_train_cube_sub = Y_cube_sub[series_train_idxs,:]
- 
+
 
                 series_test_idxs = np.where(test_series==series_test)[0]
                 X_test_cube_sub = X_cube_sub[series_test_idxs,:]
@@ -581,8 +606,16 @@ def log_reg_xsubject_transform_module_train_frac_subjects(feature_matrix, target
 
                 #initialize transform module
                 model = tm_template_weights_to_model(transform_module_template, model)
+                # patient early stopping
+                es = EarlyStopping(monitor='val_loss', mode='min', verbose=0, patience=es_patience)
                 #train
-                model.fit(X_train_cube_sub, Y_train_cube_sub, epochs=epochs, batch_size=batch_size, verbose=verbose)
+                history = model.fit(X_train_cube_sub, Y_train_cube_sub, validation_split = validation_split,\
+                        epochs=epochs, batch_size=batch_size, verbose=verbose, callbacks = [es])
+                
+                #save training details to dict
+                val_train_info_dict['train_loss'][split_count_val] = history.history['loss'][-1]
+                val_train_info_dict['val_loss'][split_count_val] = history.history['val_loss'][-1]
+                val_train_info_dict['epochs_trained'][split_count_val] = len(history.history['val_loss'])
 
                 #copy weights to a transfer module template, save if wanted
                 trained_transfer_module = model_weights_to_tm_template(transform_module_template, model)
@@ -603,33 +636,54 @@ def log_reg_xsubject_transform_module_train_frac_subjects(feature_matrix, target
 
             #put results in dataframe
             data_dict = {'Subject':[test_sub+1 for x in range(n_val_splits)],\
-                         'Fold':[split_count+1 for x in range(n_val_splits)],\
-                         'Type':['Val_Train' for x in range(n_val_splits)]}
+                            'Fold':[split_count+1 for x in range(n_val_splits)],\
+                            'Type':['Val_Train' for x in range(n_val_splits)],\
+                        'Epochs':[epochs for x in range(n_val_splits)],\
+                        'Batch_Size':[batch_size for x in range(n_val_splits)],\
+                        'Train_Loss':val_train_info_dict['train_loss'],\
+                        'Val_Loss':val_train_info_dict['val_loss'],\
+                        'Epochs_Trained':val_train_info_dict['epochs_trained'],\
+                        }
             for sidx in range(n_scores):
                 data_dict['%s_score'%(score_list[sidx])] = val_train_scores[:,sidx]
             results_df.append(pd.DataFrame(data_dict))
 
             data_dict = {'Subject':[test_sub+1 for x in range(n_val_splits)],\
-                         'Fold':[split_count+1 for x in range(n_val_splits)],\
-                         'Type':['Val_Test' for x in range(n_val_splits)]}
+                            'Fold':[split_count+1 for x in range(n_val_splits)],\
+                            'Type':['Val_Test' for x in range(n_val_splits)],\
+                        'Epochs':[epochs for x in range(n_val_splits)],\
+                        'Batch_Size':[batch_size for x in range(n_val_splits)],\
+                        'Train_Loss':val_train_info_dict['train_loss'],\
+                        'Val_Loss':val_train_info_dict['val_loss'],\
+                        'Epochs_Trained':val_train_info_dict['epochs_trained'],\
+                        }
+                        
             for sidx in range(n_scores):
                 data_dict['%s_score'%(score_list[sidx])] = val_test_scores[:,sidx]
             results_df.append(pd.DataFrame(data_dict))
 
-            
     results_df = pd.concat(results_df,axis = 0)
-
     return results_df
 
-def log_reg_xsubject_transform_module_train_all_subjects(feature_matrix, target_labels, sub_labels, block_labels,\
-                                                         train_idxs, test_idxs, exclude, model_dict, score_list,\
+def nn_xsubject_transform_module_train_all_subjects(feature_matrix, target_labels, sub_labels, block_labels,\
+                                                         train_idxs, test_idxs, model_dict, exclude, score_list,\
                                                          figure_folder = '', model_folder = '', 
-                                                         verbose = 0, epochs = 40, batch_size = 2, mv = None, permute = False):
+                                                         verbose = 0, epochs = 40, batch_size = 2, es_paience = 5, validation_split =0.25,\
+                                                    mv = None, permute = False):
     """
-    train and validate a logistic regression model with a transform module for domain adaptation. 
+    train and validate a neural netowrk model with a transform module for domain adaptation. 
     validate model performance by holding out indicated samples for each subject
 
     """
+    #default values
+    if 'fe_layers' not in model_dict.keys():
+        model_dict['fe_layers'] = 1
+    if 'fe_activation' not in model_dict.keys():
+        model_dict['fe_activation'] = 'tanh'
+    if 'tm_layers' not in model_dict.keys():
+        model_dict['tm_layers'] = 0
+    if 'tm_activation' not in model_dict.keys():
+        model_dict['tm_activation'] = ''
 
     results_df = []
 
@@ -662,16 +716,20 @@ def log_reg_xsubject_transform_module_train_all_subjects(feature_matrix, target_
     n_scores = len(score_list)
     train_scores = np.empty((subs.size,n_scores))
     test_scores = np.empty((subs.size,n_scores))
+    train_info_dict = {'val_loss': np.empty((train_subs.size,)),\
+                'train_loss': np.empty((train_subs.size,)),\
+                'epochs_trained':np.empty((train_subs.size,))}
 
     # --- Training Stage ---
+    # patient early stopping
+    es = EarlyStopping(monitor='val_loss', mode='min', verbose=0, patience=es_patience)
     # Define model architecture
-
-    #setting timestep dimension to None 
-    model = get_vanilla_nn_model((n_features,),n_outputs, n_dense_pre=model_dict['n_dense_pre'], activation=model_dict['activation'])
+    model = get_transform_module_nn_model((n_features,),n_outputs, tm_layers = model_dict['tm_layers'], tm_activation = model_dict['tm_activation'],\
+                                    fe_layers = model_dict['fe_layers'], fe_activation = model_dict['fe_activation'])
     model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
     #model.summary
     # # Get transform module template
-    transform_module_template = get_transform_module(model, Input(shape = (None,n_features)),1)
+    transform_module_template = get_transform_module(model)
 
 
     # iterate thorugh subjects' data
@@ -688,10 +746,15 @@ def log_reg_xsubject_transform_module_train_all_subjects(feature_matrix, target_
         print('Training Model')
         # fit network
         history = model.fit(X_cube_sub, Y_cube_sub, epochs=epochs, batch_size=batch_size, verbose=verbose)
+
+        #save training details to dict
+        train_info_dict['train_loss'][sub_idx] = history.history['loss'][-1]
+        train_info_dict['val_loss'][sub_idx] = history.history['val_loss'][-1]
+        train_info_dict['epochs_trained'][sub_idx] = len(history.history['val_loss'])
         if figure_folder:
             #plot training loss
             fig_title = 'Subject %02d'%(train_sub)
-            fig_fn = os.path.join(figure_folder,'log_reg_model_subject_%02d_all_train_data_permuted_%s_loss.png'%(train_sub,str(permute)))
+            fig_fn = os.path.join(figure_folder,'nn_model_subject_%02d_all_train_data_permuted_%s_loss.png'%(train_sub,str(permute)))
             plot_train_loss(history, fig_title, fig_fn)
 
         #copy weights to a transfer module template, save if wanted
@@ -722,14 +785,26 @@ def log_reg_xsubject_transform_module_train_all_subjects(feature_matrix, target_
 
     #put results in dataframe
     data_dict = {'Subject':subs_perm,\
-                 'Type':['Train' for x in range(subs_perm.size)]}
+                 'Type':['Train' for x in range(subs_perm.size)],\
+                'Epochs':[epochs for x in range(subs_perm.size)],\
+                'Batch_Size':[batch_size for x in range(subs_perm.size)],\
+                'Train_Loss':train_info_dict['train_loss'],\
+                 'Val_Loss':train_info_dict['val_loss'],\
+                 'Epochs_Trained':train_info_dict['epochs_trained'],\
+                 }
     for sidx in range(n_scores):
         data_dict['%s_score'%(score_list[sidx])] = train_scores[:,sidx]
     results_df.append(pd.DataFrame(data_dict))
 
     if test_idxs.size>0:
             data_dict = {'Subject':subs_perm,\
-                         'Type':['Train_val' for x in range(subs_perm.size)]}
+                         'Type':['Train_val' for x in range(subs_perm.size)],\
+                        'Epochs':[epochs for x in range(subs_perm.size)],\
+                'Batch_Size':[batch_size for x in range(subs_perm.size)],\
+                'Train_Loss':train_info_dict['train_loss'],\
+                 'Val_Loss':train_info_dict['val_loss'],\
+                 'Epochs_Trained':train_info_dict['epochs_trained'],\
+                 }
             for sidx in range(n_scores):
                 data_dict['%s_score'%(score_list[sidx])] = test_scores[:,sidx]
             results_df.append(pd.DataFrame(data_dict))
@@ -900,6 +975,8 @@ def within_subject_rnn_performance(X, Y, block_labels, series_labels, model_dict
         model_dict['fc_layers'] = 0
     if 'fc_activation' not in model_dict.keys():
         model_dict['fc_activation'] = 'tanh'
+    if 'n_grus' not in model_dict.keys():
+        model_dict['n_grus'] = 24
 
     #initialize object for k-fold cross-validation
     n_splits = np.unique(series_labels).size
@@ -917,7 +994,16 @@ def within_subject_rnn_performance(X, Y, block_labels, series_labels, model_dict
         print('Split Count: %i'% (split_count+1))
         #get train and test idxs
         train_idxs = np.where(series_labels==series_train)[0]
+        #exclude indicated labels -  makes training more efficient
+        in_samples = np.where(np.isin(Y,exclude, invert = True))[0]
+        train_idxs_orig = train_idxs.copy()
+        train_idxs = np.intersect1d(train_idxs,in_samples)
+
         test_idxs = np.where(series_labels==series_test)[0]
+
+
+
+
         #get training data cube
         X_train_cube, Y_train_cube, scaler = prepare_data_for_RNN(X, Y, train_idxs, exclude, train = True,\
                                                     block_labels = block_labels, nsets = n_shuffled_sets)
@@ -970,10 +1056,7 @@ def within_subject_rnn_performance(X, Y, block_labels, series_labels, model_dict
     return train_scores, test_scores, train_info_dict
 
 def evaluate_trained_rnn(X, Y, test_idxs, exclude, trained_model, score_list = ['f1'],scaler = None, mv = None):
-    #exclude indicated labels
-    test_idxs_orig = test_idxs.copy()
-    in_samples = np.where(np.isin(Y,exclude, invert = True))[0]
-    test_idxs = np.intersect1d(test_idxs,in_samples)
+    
 
     print('Evaluate Model')
     if mv:
@@ -987,12 +1070,21 @@ def evaluate_trained_rnn(X, Y, test_idxs, exclude, trained_model, score_list = [
         test_scores = get_scores(X_test_cube, Y_test_cube, trained_model, score_list, rnn = True)
     return test_scores
 
-def get_trained_rnn_model(X, Y, train_idxs, block_labels, nsets = 10, exclude = [], model_dict = {},score_list = ['f1'], verbose = 0, epochs = 40, batch_size = 2,\
-                      validation_split = 0, mv = False):
+def get_trained_rnn_model(X, Y, train_idxs, block_labels, nsets = 10, model_dict = {}, exclude = [] ,score_list = ['f1'], verbose = 0,\
+                          epochs = 100, batch_size = 2, es_patience = 5, validation_split = 0.25, mv = False):
 
+    #default values
+    if 'fe_layers' not in model_dict.keys():
+        model_dict['fe_layers'] = 1
+    if 'fe_activation' not in model_dict.keys():
+        model_dict['fe_activation'] = 'tanh'
+    if 'fc_layers' not in model_dict.keys():
+        model_dict['fc_layers'] = 0
+    if 'fc_activation' not in model_dict.keys():
+        model_dict['fc_activation'] = 'tanh'
+    if 'n_grus' not in model_dict.keys():
+        model_dict['n_grus'] = 24
 
-    if not model_dict:
-        model_dict = {'n_dense_pre':0,'n_grus':24, 'activation':'','n_dense_post':0}
 
     #exclude indicated labels
     in_samples = np.where(np.isin(Y,exclude, invert = True))[0]
@@ -1009,16 +1101,21 @@ def get_trained_rnn_model(X, Y, train_idxs, block_labels, nsets = 10, exclude = 
     assert X_train_cube.shape[1] == Y_train_cube.shape[1]
 
     n_features, n_outputs = X_train_cube.shape[2], Y_train_cube.shape[2]
+    # patient early stopping
+    es = EarlyStopping(monitor='val_loss', mode='min', verbose=0, patience=es_patience)
     #setting timestep dimension to None 
-    model = get_rnn_model((None,n_features,),n_outputs,n_dense_pre=model_dict['n_dense_pre'], n_dense_post=model_dict['n_dense_post'],\
-                          n_grus = model_dict['n_grus'], activation=model_dict['activation'])
+    model = get_rnn_model((None,n_features,),n_outputs, n_grus = model_dict['n_grus'], fe_layers = model_dict['fe_layers'],\
+                              fe_activation = model_dict['fe_activation'],\
+                              fc_layers = model_dict['fe_layers'], fc_activation = model_dict['fc_activation'])
+
     model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
     #model.summary
 
     print('Training Model')
     # fit network
     history = model.fit(X_train_cube, Y_train_cube,validation_split = validation_split, \
-                        epochs=epochs, batch_size=batch_size, verbose=verbose)
+                        epochs=epochs, batch_size=batch_size, verbose=verbose, callbacks = [es])
+    print('Epochs Trained: %d'%(len(history.history['val_loss'])))
     # # evaluate trained network
     print('Evaluate Model on Trained Data')
 
@@ -1030,8 +1127,9 @@ def get_trained_rnn_model(X, Y, train_idxs, block_labels, nsets = 10, exclude = 
         train_scores = get_scores(X_train_cube, Y_train_cube, model, score_list, rnn = True)
     return train_scores, model, scaler, history
 
-def rnn_xsubject_test(data_folder, src_subject_id, nsubjects, nreps, lo_freq, hi_freq, win_size, step, exclude, score_list = ['f1'], \
-                          nsets_training = 10,verbose = 0, epochs = 40, batch_size = 2, mv = False, permute = False):
+def across_suject_rnn_performance(data_folder, src_subject_id, nsubjects, nreps, lo_freq, hi_freq, win_size, step, model_dict, exclude, \
+                                  score_list = ['f1'],  nsets_training = 10,verbose = 0, epochs = 100, batch_size = 2, es_patience = 5, \
+                                  mv = False, permute = False):
     """
     Test naive cross-subject generalization of an RNN model
     Train an RNN model on data from one subject; test on all other subjects
@@ -1055,6 +1153,9 @@ def rnn_xsubject_test(data_folder, src_subject_id, nsubjects, nreps, lo_freq, hi
     results_df = []#initialize empty array for dataframes
     n_scores = len(score_list)
     train_scores_all = np.empty((nreps,n_scores))
+    train_info_dict = {'val_loss': np.empty((nreps,)),\
+                    'train_loss': np.empty((nreps,)),\
+                    'epochs_trained':np.empty((nreps,))}
 
     for rep in range(nreps):
         if permute:
@@ -1062,12 +1163,16 @@ def rnn_xsubject_test(data_folder, src_subject_id, nsubjects, nreps, lo_freq, hi
             target_labels_src = permute_class_within_sub(target_labels_src_orig, block_labels_src, np.ones((target_labels_src.size,)), exclude)
 
         print('Subject %d|Rep %d'%(src_subject_id, rep+1))
-        train_scores, trained_model, scaler, train_history = get_trained_rnn_model(feature_matrix_src, target_labels_src, train_idxs, block_labels_src,
-                                                                                        nsets_training,exclude,\
-                                                                                score_list = score_list,\
-                                                                        verbose = verbose, epochs = epochs, batch_size = batch_size,\
-                                                                        mv = mv)
+        train_scores, trained_model, scaler, train_history = get_trained_rnn_model(feature_matrix_src, target_labels_src, train_idxs,\
+                                                                                   block_labels_src, nsets_training, model_dict, exclude,\
+                                                                                score_list = score_list, verbose = verbose, epochs = epochs,\
+                                                                                 batch_size = batch_size, es_patience = es_patience,\
+                                                                                 mv = mv)
         train_scores_all[rep,:] = train_scores
+        #save training details to dict
+        train_info_dict['train_loss'][rep] = train_history.history['loss'][-1]
+        train_info_dict['val_loss'][rep] = train_history.history['val_loss'][-1]
+        train_info_dict['epochs_trained'][rep] = len(train_history.history['val_loss'])
 
         # test on all other subjects
         # initialize empty lists
@@ -1094,16 +1199,28 @@ def rnn_xsubject_test(data_folder, src_subject_id, nsubjects, nreps, lo_freq, hi
 
             #put testing results in dataframe
         data_dict = {'Type':['Test' for x in range(nsubjects-1)],\
-                        'Rep':[rep+1 for x in range(nsubjects-1)],\
-                        'Test_Subject':targ_subject_list}
+                     'Rep':[rep+1 for x in range(nsubjects-1)],\
+                     'Test_Subject':targ_subject_list,\
+                     'Epochs':[epochs for x in range(nsubjects-1)],\
+                     'Batch_Size':[batch_size for x in range(nsubjects-1)],\
+                     'Train_Loss':[train_info_dict['train_loss'][rep] for x in range(nsubjects-1)],\
+                    'Val_Loss':[train_info_dict['val_loss'][rep] for x in range(nsubjects-1)],\
+                    'Epochs_Trained':[train_info_dict['epochs_trained'][rep] for x in range(nsubjects-1)],\
+                     }
         for sidx in range(n_scores):
             data_dict['%s_score'%(score_list[sidx])] = test_scores_all[:,sidx]
         results_df.append(pd.DataFrame(data_dict))
 
     # #put training results in dataframe
     data_dict = {'Type':['Train' for x in range(nreps)],\
-                    'Rep':[x+1 for x in range(nreps)],\
-                    'Test_Subject':[src_subject_id for x in range(nreps)]}
+                 'Rep':[x+1 for x in range(nreps)],\
+                 'Test_Subject':[src_subject_id for x in range(nreps)],\
+                 'Epochs':[epochs for x in range(nreps)],\
+                'Batch_Size':[batch_size for x in range(nreps)],\
+                'Train_Loss':train_info_dict['train_loss'],\
+                    'Val_Loss':train_info_dict['val_loss'],\
+                    'Epochs_Trained':train_info_dict['epochs_trained'],\
+                 }
     for sidx in range(n_scores):
         data_dict['%s_score'%(score_list[sidx])] = train_scores_all[:,sidx]
     results_df.append(pd.DataFrame(data_dict))
