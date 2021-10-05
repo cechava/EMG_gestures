@@ -668,7 +668,7 @@ def nn_xsubject_transform_module_train_frac_subjects(feature_matrix, target_labe
 def nn_xsubject_transform_module_train_all_subjects(feature_matrix, target_labels, sub_labels, block_labels,\
                                                          train_idxs, test_idxs, model_dict, exclude, score_list,\
                                                          figure_folder = '', model_folder = '', 
-                                                         verbose = 0, epochs = 40, batch_size = 2, es_paience = 5, validation_split =0.25,\
+                                                         verbose = 0, epochs = 40, batch_size = 2, es_patience = 5, validation_split =0.25,\
                                                     mv = None, permute = False):
     """
     train and validate a neural netowrk model with a transform module for domain adaptation. 
@@ -716,13 +716,11 @@ def nn_xsubject_transform_module_train_all_subjects(feature_matrix, target_label
     n_scores = len(score_list)
     train_scores = np.empty((subs.size,n_scores))
     test_scores = np.empty((subs.size,n_scores))
-    train_info_dict = {'val_loss': np.empty((train_subs.size,)),\
-                'train_loss': np.empty((train_subs.size,)),\
-                'epochs_trained':np.empty((train_subs.size,))}
+    train_info_dict = {'val_loss': np.empty((subs.size,)),\
+                'train_loss': np.empty((subs.size,)),\
+                'epochs_trained':np.empty((subs.size,))}
 
     # --- Training Stage ---
-    # patient early stopping
-    es = EarlyStopping(monitor='val_loss', mode='min', verbose=0, patience=es_patience)
     # Define model architecture
     model = get_transform_module_nn_model((n_features,),n_outputs, tm_layers = model_dict['tm_layers'], tm_activation = model_dict['tm_activation'],\
                                     fe_layers = model_dict['fe_layers'], fe_activation = model_dict['fe_activation'])
@@ -744,8 +742,11 @@ def nn_xsubject_transform_module_train_all_subjects(feature_matrix, target_label
         model = tm_template_weights_to_model(transform_module_template, model)
 
         print('Training Model')
+        # patient early stopping
+        es = EarlyStopping(monitor='val_loss', mode='min', verbose=0, patience=es_patience)
         # fit network
-        history = model.fit(X_cube_sub, Y_cube_sub, epochs=epochs, batch_size=batch_size, verbose=verbose)
+        history = model.fit(X_cube_sub, Y_cube_sub, validation_split = validation_split, epochs=epochs, \
+                            batch_size=batch_size, verbose=verbose, callbacks = [es])
 
         #save training details to dict
         train_info_dict['train_loss'][sub_idx] = history.history['loss'][-1]
