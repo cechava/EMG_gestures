@@ -445,7 +445,6 @@ def nn_xsubject_transform_module_train_frac_subjects(feature_matrix, target_labe
     train and validate model performance by splitting subjects into a train and test set
     """
 
-
     #default values
     if 'fe_layers' not in model_dict.keys():
         model_dict['fe_layers'] = 1
@@ -569,6 +568,9 @@ def nn_xsubject_transform_module_train_frac_subjects(feature_matrix, target_labe
         #freeze feature exraction layers
         for layer in model.get_layer('feature_extractor').layers:
                 layer.trainable = False
+        #freeze label prediction layers
+        for layer in model.get_layer('label_predictor').layers:
+                layer.trainable = False
 
         # iterate through test subjects
         for sub_idx, test_sub in enumerate(test_subs):
@@ -604,8 +606,12 @@ def nn_xsubject_transform_module_train_frac_subjects(feature_matrix, target_labe
                 X_test_cube_sub = X_cube_sub[series_test_idxs,:]
                 Y_test_cube_sub = Y_cube_sub[series_test_idxs,:]
 
+
+
                 #initialize transform module
                 model = tm_template_weights_to_model(transform_module_template, model)
+                #re-compile model
+                model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
                 # patient early stopping
                 es = EarlyStopping(monitor='val_loss', mode='min', verbose=0, patience=es_patience)
                 #train
@@ -632,7 +638,6 @@ def nn_xsubject_transform_module_train_frac_subjects(feature_matrix, target_labe
                 else:
                     val_train_scores[split_count_val,:] = get_scores(X_train_cube_sub, Y_train_cube_sub, model, score_list)
                     val_test_scores[split_count_val,:] = get_scores(X_test_cube_sub, Y_test_cube_sub, model, score_list)
-
 
             #put results in dataframe
             data_dict = {'Subject':[test_sub+1 for x in range(n_val_splits)],\
