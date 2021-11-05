@@ -747,6 +747,7 @@ def nn_xsubject_transform_module_train_all_subjects(feature_matrix, target_label
         model = tm_template_weights_to_model(transform_module_template, model)
 
         print('Training Model')
+        model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
         # patient early stopping
         es = EarlyStopping(monitor='val_loss', mode='min', verbose=0, patience=es_patience)
         # fit network
