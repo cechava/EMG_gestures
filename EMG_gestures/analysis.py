@@ -49,6 +49,7 @@ from EMG_gestures.models import DANN, EarlyStopping_Custom
 __all__ = ['within_subject_nn_performance','get_trained_model','evaluate_trained_nn','across_subject_nn_performance',\
 'nn_xsubject_joint_data_train_frac_subjects',' nn_xsubject_joint_data_train_all_subjects',\
 'nn_xsubject_transform_module_train_frac_subjects','nn_xsubject_transform_module_train_all_subjects',\
+'nn_xsubject_transform_module_test_subject_eval',\
 'DANN_test',\
 'within_subject_rnn_performance','evaluate_trained_rnn','get_trained_rnn_model','across_suject_rnn_performance']
 
@@ -823,6 +824,138 @@ def nn_xsubject_transform_module_train_all_subjects(feature_matrix, target_label
         model_fn = os.path.join(model_folder, 'trained_model_all_train_data_permuted_%s.h5'%(str(permute)))
         keras.models.save_model(model, model_fn, save_format= 'h5')
     return results_df, scaler
+def nn_xsubject_transform_module_test_subject_eval(feature_matrix, target_labels, sub_labels, block_labels, series_labels,\
+                                                     trained_model, scaler, model_dict, exclude, score_list = ['f1'],n_splits = 2,\
+                                                     verbose = 0, epochs = 40, batch_size = 2, es_patience = 5,validation_split = 0.25,\
+                                                     mv = None, permute = False):
+
+    if permute:
+            #permute while ignoring excluded blocks
+            target_labels = permute_class_within_sub(target_labels, block_labels, sub_labels, exclude)
+    test_subjects = np.unique(sub_labels)
+    #exclude indicated labels
+    in_samples = np.where(np.isin(target_labels,exclude, invert = True))[0]
+    test_idxs = np.arange(feature_matrix.shape[0])
+
+    # get testing data cubes
+    X_test_cube, Y_test_cube, scaler = prepare_data_for_TF(feature_matrix, target_labels, test_idxs, exclude, train = False, scaler = scaler)
+    sub_labels_test = sub_labels[np.intersect1d(test_idxs,in_samples)]
+    series_labels_test = series_labels[np.intersect1d(test_idxs,in_samples)]
+    n_features, n_outputs = X_test_cube.shape[1], Y_test_cube.shape[1]
+    # define untrained model
+    untrained_model = get_transform_module_nn_model((n_features,),n_outputs, tm_layers = model_dict['tm_layers'], tm_activation = model_dict['tm_activation'],\
+                                    fe_layers = model_dict['fe_layers'], fe_activation = model_dict['fe_activation'])
+    untrained_model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+    # # Get untrained transform module template
+    transform_module_template = get_transform_module(untrained_model)
+    # make sure weights of feature extractor and label predicting layers are frozen
+    for layer in trained_model.get_layer('feature_extractor').layers:
+            layer.trainable = False
+    for layer in trained_model.get_layer('label_predictor').layers:
+            layer.trainable = False
+
+    # iterate through test subjects
+    test_subjects = np.array(test_subjects)
+    n_scores = len(score_list)
+    results_df = []
+    for sub_idx, test_sub in enumerate(test_subjects):
+        print('Test: Subject %02d out of %02d'%(sub_idx+1, test_subjects.size))
+
+        #get relevant subject samples
+        test_sub_idxs = np.where(sub_labels_test == test_sub)[0]
+        test_series = series_labels_test[test_sub_idxs]
+        X_cube_sub = X_test_cube[test_sub_idxs,:]
+        Y_cube_sub = Y_test_cube[test_sub_idxs,]
+        test_sub_labels = np.argmax(Y_cube_sub,1)
+
+        #stratify split to retain ratio of class labels
+        kf = KFold(n_splits=n_splits,shuffle = True)
+
+        train_scores = np.empty((n_splits,n_scores))
+        test_scores = np.empty((n_splits,n_scores))
+        #training deets
+        train_info_dict = {'val_loss': np.empty((n_splits,)),\
+                        'train_loss': np.empty((n_splits,)),\
+                        'epochs_trained':np.empty((n_splits,))}
+
+        #systematically use one fold of the data as a held-out test set
+        for split_count, (series_train, series_test) in enumerate(kf.split(np.unique(test_series))):
+            
+            #split data cubes into train and test subsets
+            series_train_idxs = np.where(test_series==series_train)[0]
+            X_train_cube_sub = X_cube_sub[series_train_idxs,:]
+            Y_train_cube_sub = Y_cube_sub[series_train_idxs,:]
+
+
+            series_test_idxs = np.where(test_series==series_test)[0]
+            X_test_cube_sub = X_cube_sub[series_test_idxs,:]
+            Y_test_cube_sub = Y_cube_sub[series_test_idxs,:]
+
+
+            #initialize transform module
+            trained_model = tm_template_weights_to_model(transform_module_template, trained_model)
+            #re-compile model
+            trained_model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+            # patient early stopping
+            es = EarlyStopping(monitor='val_loss', mode='min', verbose=0, patience=es_patience)
+            #train
+            history = trained_model.fit(X_train_cube_sub, Y_train_cube_sub, validation_split = validation_split,\
+                    epochs=epochs, batch_size=batch_size, verbose=verbose, callbacks = [es])
+            
+            #save training details to dict
+            train_info_dict['train_loss'][split_count] = history.history['loss'][-1]
+            train_info_dict['val_loss'][split_count] = history.history['val_loss'][-1]
+            train_info_dict['epochs_trained'][split_count] = len(history.history['val_loss'])
+
+            #copy weights to a transfer module template, save if wanted
+            trained_transfer_module = model_weights_to_tm_template(transform_module_template, trained_model)
+
+            #evaluate on training and testing
+            if mv:
+                #get f1 score after applying majority voting scheme to model predictions
+                train_scores[split_count,:]  = apply_mv_and_get_scores(feature_matrix[test_idxs], target_labels[test_idxs],\
+                                                                np.where(series_labels[test_idxs]==series_train)[0], exclude,\
+                                                                model = model, n_votes = mv, scaler = scaler, score_list = score_list)
+                test_scores[split_count,:]  = apply_mv_and_get_scores(feature_matrix[test_idxs], target_labels[test_idxs],\
+                                                                np.where(series_labels[test_idxs]==series_test)[0], exclude,\
+                                                                model = model, n_votes = mv, scaler = scaler, score_list = score_list)
+            else:
+                train_scores[split_count,:] = get_scores(X_train_cube_sub, Y_train_cube_sub, trained_model, score_list)
+                test_scores[split_count,:] = get_scores(X_test_cube_sub, Y_test_cube_sub, trained_model, score_list)
+
+        #put results in dataframe
+        data_dict = {'Subject':[test_sub for x in range(n_splits)],\
+                        'Fold':[x+1 for x in range(n_splits)],\
+                        'Type':['Train' for x in range(n_splits)],\
+                    'Epochs':[epochs for x in range(n_splits)],\
+                    'Batch_Size':[batch_size for x in range(n_splits)],\
+                    'Train_Loss':train_info_dict['train_loss'],\
+                    'Val_Loss':train_info_dict['val_loss'],\
+                    'Epochs_Trained':train_info_dict['epochs_trained'],\
+                    }
+        for sidx in range(n_scores):
+            data_dict['%s_score'%(score_list[sidx])] = train_scores[:,sidx]
+        results_df.append(pd.DataFrame(data_dict))
+
+        data_dict = {'Subject':[test_sub for x in range(n_splits)],\
+                        'Fold':[x+1 for x in range(n_splits)],\
+                        'Type':['Test' for x in range(n_splits)],\
+                    'Epochs':[epochs for x in range(n_splits)],\
+                    'Batch_Size':[batch_size for x in range(n_splits)],\
+                    'Train_Loss':train_info_dict['train_loss'],\
+                    'Val_Loss':train_info_dict['val_loss'],\
+                    'Epochs_Trained':train_info_dict['epochs_trained'],\
+                    }
+                    
+        for sidx in range(n_scores):
+            data_dict['%s_score'%(score_list[sidx])] = test_scores[:,sidx]
+        results_df.append(pd.DataFrame(data_dict))
+    #concatenate and return dataframe
+    results_df = pd.concat(results_df, axis = 0)\
+    .reset_index()\
+    .drop(columns=['index'])
+
+    return results_df
 
 def DANN_test(source_X, source_Y, target_X, target_Y, score_list, n_splits, epochs, batch_size,\
               permute = False):
